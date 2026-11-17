@@ -26,6 +26,28 @@ class LogicTests(unittest.TestCase):
         self.assertAlmostEqual(d["temperature"], 17.7)
         self.assertEqual(d["temp_01"], 17.3)
 
+    def test_v033_daren_temperature_schema(self):
+        class Probe:
+            def __init__(self, value, name):
+                self.value = value
+                self.type = type("Type", (), {"name": name})()
+
+        sample = {
+            "temp_sensors": 3,
+            "temp_values": [Probe(16.1, "CELL"), Probe(18.2, "CELL"),
+                            Probe(21.1, "MOSFET")],
+            "temperature": 17.15,
+            "delta_voltage": 0.002,
+        }
+        out = normalise_sample(sample)
+        self.assertEqual(out["temp_count"], 3)
+        self.assertEqual(out["temp_01"], 16.1)
+        self.assertEqual(out["temp_02"], 18.2)
+        self.assertEqual(out["temp_03"], 21.1)
+        self.assertEqual(out["temp_type_03"], "MOSFET")
+        self.assertEqual(out["temperature"], 17.15)
+        self.assertEqual(out["delta_cell_voltage"], 0.002)
+
     def test_parallel_weighted_aggregate(self):
         sample1 = {"battery_level": 40, "design_capacity": 200, "voltage": 52, "current": -4, "power": -208}
         sample2 = {"battery_level": 20, "design_capacity": 300, "voltage": 52.4, "current": -6, "power": -314.4}
