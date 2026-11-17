@@ -34,6 +34,9 @@ configuration:
     description: Each cycle reads all batteries and publishes measurements; BLE duration can limit throughput
   rescan_seconds:
     name: Device rescan interval (seconds)
+  missing_rescan_seconds:
+    name: Rescan interval while an assigned BMS is missing (seconds)
+    description: Scan more often only when one of the saved battery slots has not been detected
   mqtt_mode:
     name: MQTT connection mode
     description: auto = Supervisor credentials; manual = credentials entered below
