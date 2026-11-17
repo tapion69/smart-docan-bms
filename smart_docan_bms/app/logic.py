@@ -6,6 +6,7 @@ or protection parameter writes are implemented.
 from __future__ import annotations
 
 import re
+import math
 from datetime import datetime, timezone
 
 # field: French label, unit, device class, state class, category, kind
@@ -31,7 +32,8 @@ FIELDS = {
     "temperature": ("Température moyenne", "°C", "temperature", "measurement", None, "sensor"),
     "balance_current": ("Courant équilibrage", "A", "current", "measurement", "diagnostic", "sensor"),
     "heater_current": ("Courant chauffage", "A", "current", "measurement", "diagnostic", "sensor"),
-    "runtime": ("Autonomie estimée", "s", "duration", "measurement", "diagnostic", "sensor"),
+    "runtime": ("Autonomie brute", "s", "duration", "measurement", "diagnostic", "sensor"),
+    "runtime_text": ("Autonomie estimée", None, None, None, None, "sensor"),
     "problem_code": ("Code alarme", None, None, None, "diagnostic", "sensor"),
     "balancer": ("Équilibrage actif", None, None, None, "diagnostic", "binary_sensor"),
     "battery_charging": ("En charge", None, None, None, None, "binary_sensor"),
@@ -46,6 +48,43 @@ FIELDS = {
 def device_id(mac: str) -> str:
     """Stable identifier independent of scan order and friendly name."""
     return "docan_" + re.sub(r"[^0-9a-f]", "", mac.lower())
+
+VOLTAGE_THREE_DECIMALS = {
+    "delta_cell_voltage", "cell_min_voltage", "cell_max_voltage",
+    "voltage_spread",
+}
+
+
+def voltage_decimals(key: str) -> int | None:
+    """Pack voltage is 2 decimals; every other published voltage is 3."""
+    if key == "voltage":
+        return 2
+    if key in VOLTAGE_THREE_DECIMALS or re.fullmatch(r"cell_\d{2}", key):
+        return 3
+    return None
+
+
+def format_runtime(seconds: object) -> str | None:
+    """French duration: days/hours/minutes, and seconds only under one minute."""
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    remaining = int(seconds)
+    if remaining < 60:
+        return f"{remaining} s"
+    minutes = remaining // 60
+    days, rem_minutes = divmod(minutes, 1440)
+    hours, mins = divmod(rem_minutes, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} j")
+    if hours:
+        parts.append(f"{hours} h")
+    if mins or not parts:
+        parts.append(f"{mins} min")
+    return " ".join(parts)
+
 
 def normalise_sample(sample: dict, rssi: int | None = None) -> dict:
     """Keep supported raw fields and expose every returned cell/temperature."""
@@ -69,12 +108,12 @@ def normalise_sample(sample: dict, rssi: int | None = None) -> dict:
     cells = sample.get("cell_voltages", []) or []
     if cells:
         for pos, voltage in enumerate(cells, 1):
-            data[f"cell_{pos:02d}"] = round(float(voltage), 4)
+            data[f"cell_{pos:02d}"] = round(float(voltage), 3)
         data["cell_min_voltage"] = min(cells)
         data["cell_max_voltage"] = max(cells)
         data["cell_min_index"] = cells.index(min(cells)) + 1
         data["cell_max_index"] = cells.index(max(cells)) + 1
-        data.setdefault("delta_cell_voltage", round(max(cells) - min(cells), 4))
+        data.setdefault("delta_cell_voltage", round(max(cells) - min(cells), 3))
 
     # aiobmsble 0.33.0 also publishes a numeric average in "temperature".
     avg_temp = sample.get("temperature")
@@ -98,10 +137,22 @@ def normalise_sample(sample: dict, rssi: int | None = None) -> dict:
     if rssi is not None:
         data["rssi"] = rssi
 
+    # Preserve numeric states for automations, but apply a consistent precision
+    # before MQTT publication (no fabricated accuracy beyond the BMS values).
+    for key, value in list(data.items()):
+        digits = voltage_decimals(key)
+        if digits is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
+            if math.isfinite(value):
+                data[key] = round(float(value), digits)
+
     if "voltage" in data and "battery_level" in data and "design_capacity" in data:
         data["stored_energy_wh"] = round(
             data["voltage"] * data["design_capacity"] * data["battery_level"] / 100, 1
         )
+    if "runtime" in data:
+        text = format_runtime(data["runtime"])
+        if text is not None:
+            data["runtime_text"] = text
     data["last_seen"] = datetime.now(timezone.utc).isoformat()
     return data
 

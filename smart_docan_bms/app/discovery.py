@@ -1,7 +1,7 @@
 """Home Assistant MQTT Discovery with predictable IDs for installation slots."""
 from __future__ import annotations
 
-from logic import FIELDS, device_id, field_spec
+from logic import FIELDS, device_id, field_spec, voltage_decimals
 from slots import entity_key, global_entity_id, slot_device_id, slot_entity_id
 
 
@@ -38,6 +38,16 @@ def battery_discovery(slot: int, name: str, key: str, info: dict) -> tuple[str, 
     if kind == "binary_sensor":
         config.update(payload_on="ON", payload_off="OFF")
     else:
+        digits = voltage_decimals(key)
+        if digits is not None:
+            config["suggested_display_precision"] = digits
+            # The state itself keeps its trailing zeroes as well as the
+            # suggested frontend precision, without changing its unique_id.
+            config["value_template"] = (
+                "{{ '%." + str(digits) + "f' | format(value_json.get('"
+                + key + "')) if value_json.get('" + key
+                + "') is not none else 'None' }}"
+            )
         if unit:
             config["unit_of_measurement"] = unit
         if state_class:
@@ -85,6 +95,13 @@ def global_discovery(key: str) -> tuple[str, dict]:
         config.update(unit_of_measurement=unit, state_class="measurement")
     if device_class:
         config["device_class"] = device_class
+    if key in ("voltage", "voltage_spread"):
+        config["suggested_display_precision"] = 3
+        config["value_template"] = (
+            "{{ '%.3f' | format(value_json.get('" + key
+            + "')) if value_json.get('" + key
+            + "') is not none else 'None' }}"
+        )
     return f"homeassistant/sensor/{uid}/config", config
 
 

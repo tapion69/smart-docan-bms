@@ -2,7 +2,7 @@
 
 Add-on **Home Assistant OS / Supervised** pour les batteries **Docan Power NOON équipées d'un BMS Daren** diffusant un nom Bluetooth commençant par `DWF`.
 
-> **Statut : 0.1.4-dev — développement, validé sur une première installation à 4 batteries.**
+> **Statut : 0.1.5-dev — développement, validé sur une première installation à 4 batteries.**
 > La lecture des 64 cellules a été confirmée sur cette installation. La connexion MQTT reste à valider sur le matériel cible après configuration manuelle.
 > Ce projet n'effectue aucune commande de configuration des BMS : uniquement des requêtes de télémétrie. Il ne remplace **jamais** les protections du BMS.
 
@@ -13,18 +13,31 @@ Add-on **Home Assistant OS / Supervised** pour les batteries **Docan Power NOON 
 - Mesures retournées par [aiobmsble](https://github.com/patman15/aiobmsble), bibliothèque Apache-2.0 (version 0.33.0), dont les **16 tensions de cellules** quand elles sont transmises.
 - Tension, courant, puissance, SOC, SOH, capacité, cycles, écarts, numéros des cellules min/max, températures individuelles, équilibrage, MOSFET, alarmes et informations disponibles selon le firmware.
 - MQTT Discovery : entités créées automatiquement **uniquement lorsqu'une valeur est réellement reçue**.
-- Tableau de bord en français dans Home Assistant (**Ingress**, port interne 1895).
+- **Sans serveur web ni Ingress** : l’add-on est un collecteur Bluetooth/MQTT uniquement. Un dashboard HTML Home Assistant séparé sera conçu ultérieurement.
 - Synthèse multi-batteries en **parallèle** : SOC pondéré par capacité lorsque connue, somme courants et puissances, tension moyenne, suspendue si une batterie connue est hors ligne.
 - Échecs Bluetooth : 3 erreurs consécutives avant passage hors ligne; reconnexion automatique au cycle suivant.
 - MQTT automatique (identifiants du Supervisor) ou manuel (hôte, port, identifiant et mot de passe masqué).
 - Période cible de collecte configurable : mesurée du **début du cycle BLE au début du cycle BLE suivant**, et non comme une pause systématique à la fin. Publication MQTT lors des lectures réussies, indépendante du rafraîchissement de la page.
+
+## Présentation des mesures (depuis 0.1.5-dev)
+
+Le collecteur applique les règles suivantes avant publication MQTT :
+
+- **Tensions des cellules et mesures de tension associées** (min/max, delta, écarts entre batteries) : 3 chiffres après la virgule, par exemple **3,300 V** et **0,003 V**.
+- **Tension individuelle de chaque pack** : 2 chiffres après la virgule, par exemple **53,12 V**.
+- **Tension moyenne globale** : 3 chiffres après la virgule.
+- **Autonomie estimée** : création d'une entité texte supplémentaire, par exemple **1 j 4 h 15 min** ou **2 h 30 min**. Le capteur numérique `runtime` (secondes) est conservé pour les automatisations et pour ne pas changer les `unique_id` existants.
+
+Les capteurs MQTT de tension utilisent `suggested_display_precision` et des modèles d'état à précision fixe. Ils restent numériques : les décimales ajoutées à l'affichage ne signifient pas que le BMS a gagné en précision de mesure. Les entités ne sont créées que si la donnée correspondante est réellement fournie.
+
+Le dashboard HTML prévu ultérieurement sera développé **séparément** dans Home Assistant et réutilisera les entités fixes MQTT, sans serveur web dans l'add-on.
 
 ## Installation
 
 1. **Pré-requis** : Home Assistant OS/Supervised avec adaptateur Bluetooth fonctionnel, intégration Bluetooth activée et broker Mosquitto configuré avec l'intégration MQTT.
 2. Dans **Paramètres → Modules complémentaires / Applications → Boutique → ⋮ → Dépôts**, ajouter `https://github.com/tapion69/smart-docan-bms`.
 3. Installer **Smart Docan BMS**, ouvrir la configuration et laisser `auto_discover: true` pour retrouver les BMS `DWF`.
-4. Démarrer l'add-on, consulter l'onglet **Journal** puis **Ouvrir l'interface web**.
+4. Démarrer l'add-on et consulter uniquement l'onglet **Journal** (pas de bouton d'interface web).
 5. Les appareils/capteurs apparaîtront via **MQTT** après une première lecture réussie.
 
 Le Supervisor installe uniquement depuis la branche principale de ce dépôt. Les branches de développement nécessitent une fusion dans `main` avant de pouvoir être installées par URL.
@@ -59,7 +72,7 @@ Pour conserver temporairement les anciennes entités (par exemple, pendant une m
 
 ## Logo
 
-Le logo choisi pour Smart Docan BMS (batterie à quatre cellules vertes, connexion Bluetooth bleue et courbe de télémétrie) est intégré sous `smart_docan_bms/icon.png` et `smart_docan_bms/logo.png`. Il apparaît dans la boutique et la page de l'add-on ainsi que dans le tableau de bord Ingress.
+Le logo choisi pour Smart Docan BMS (batterie à quatre cellules vertes, connexion Bluetooth bleue et courbe de télémétrie) est conservé sous `smart_docan_bms/icon.png` et `smart_docan_bms/logo.png` pour la fiche de l’add-on. Aucun serveur HTTP n'est intégré.
 
 ## Options
 
@@ -75,7 +88,6 @@ Le logo choisi pour Smart Docan BMS (batterie à quatre cellules vertes, connexi
 | `scan_seconds` | `8` | Durée d'une recherche BLE |
 | `rescan_seconds` | `180` | Intervalle entre deux recherches BLE |
 | `poll_seconds` | `30` | Période cible entre débuts des cycles de lecture complets. Inclut le temps BLE (minimum configurable : 5 s) |
-| `dashboard_refresh_seconds` | `20` | Actualisation automatique de la page Ingress (5–120 s) |
 | `mqtt_mode` | `auto` | `auto` utilise le service MQTT du Supervisor, `manual` prend les valeurs ci-dessous |
 | `mqtt_host` | `core-mosquitto` | Serveur MQTT pour le mode manuel |
 | `mqtt_port` | `1883` | Port TCP MQTT (par défaut non chiffré) |
@@ -94,7 +106,7 @@ Pour utiliser un utilisateur MQTT explicitement autorisé par Mosquitto, ouvrir 
 2. Indiquer `mqtt_host: core-mosquitto`, `mqtt_port: 1883` si le broker Mosquitto officiel tourne sur cette même installation Home Assistant.
 3. Renseigner `mqtt_username` et `mqtt_password` correspondant à un compte MQTT dédié (créé/autorisé dans Mosquitto).
 4. Laisser `mqtt_tls: false` pour le port 1883 standard.
-5. **Enregistrer** puis **redémarrer** l'add-on. Vérifier "MQTT : Connecté" sur le dashboard et la présence des entités dans l'intégration MQTT de Home Assistant.
+5. **Enregistrer** puis **redémarrer** l'add-on. Vérifier « MQTT connecté » dans les journaux et la présence des entités dans l'intégration MQTT de Home Assistant.
 
 En mode `auto`, `mqtt_host`, `mqtt_port`, `mqtt_username` et `mqtt_password` sont volontairement ignorés et les données du service Supervisor sont utilisées à la place. La déclaration du service est facultative (`mqtt:want`) pour permettre un broker externe.
 
@@ -104,17 +116,16 @@ En mode `auto`, `mqtt_host`, `mqtt_port`, `mqtt_username` et `mqtt_password` son
 
 - `poll_seconds: 30` = lancement d'un cycle de lecture des quatre batteries au maximum toutes les 30 secondes. Si le cycle BLE prend 9 s, l'add-on attend 21 s. Si le cycle prend 38 s, le cycle suivant démarre sans pause additionnelle.
 - Les mesures sont publiées au broker MQTT après chaque interrogation d'une batterie; Home Assistant reçoit donc les nouveaux états à chaque cycle.
-- `dashboard_refresh_seconds: 20` = fréquence de rafraîchissement de la page web; ce paramètre **ne pilote pas** le Bluetooth et n'accélère pas les valeurs MQTT.
-- La page affiche la **durée du dernier cycle BLE complet** afin de vérifier si la période souhaitée est réalisable avec 4 BMS.
+- Il n'y a plus de paramètre `dashboard_refresh_seconds` : les mises à jour MQTT et le futur dashboard HTML seront indépendants. La cadence de lecture BLE est toujours limitée par le temps de communication avec les quatre batteries.
 
-Les options enregistrées prennent effet au redémarrage de l'add-on. La valeur `poll_seconds: 5` est autorisée depuis 0.1.4-dev. Avec quatre batteries lues successivement, si les quatre échanges Bluetooth demandent plus de cinq secondes, la cadence réelle sera plus longue : aucune lecture en parallèle ni accélération forcée. Des délais trop courts peuvent dégrader la stabilité Bluetooth ; commencer à 30 s et diminuer progressivement.
+Les options enregistrées prennent effet au redémarrage de l'add-on. La valeur `poll_seconds: 5` est autorisée depuis 0.1.5-dev. Avec quatre batteries lues successivement, si les quatre échanges Bluetooth demandent plus de cinq secondes, la cadence réelle sera plus longue : aucune lecture en parallèle ni accélération forcée. Des délais trop courts peuvent dégrader la stabilité Bluetooth ; commencer à 30 s et diminuer progressivement.
 
 ## Diagnostic MQTT et températures
 
-- Si MQTT affiche **Non connecté**, le panneau indique l’hôte et le port du service Supervisor, l’état de connexion et le compteur d’échecs (jamais le mot de passe).
+- Si MQTT n'arrive pas à se connecter, les journaux indiquent l'hôte, le port, les codes d'échec et les tentatives, sans enregistrer le mot de passe.
 - Vérifier les journaux du module **Smart Docan BMS**, ainsi que ceux de **Mosquitto broker**. Les erreurs TCP/TLS ne sont plus silencieuses.
-- Si une batterie affiche **Températures : Non disponible**, la ligne de diagnostic indique le nombre de sondes annoncé dans la trame, le type de données et le nombre de mesures effectivement décodées.
-- L’onglet **Autres informations disponibles** présente les capacités, numéros de cellules extrêmes, MOSFET, équilibrage et codes remontés. Aucun paramètre BMS n’est écrit.
+- Si les températures sont absentes, le journal indique le nombre de sondes annoncé dans la trame et les mesures décodées.
+- Les capacités, cellules extrêmes, MOSFET, équilibrage et codes disponibles continuent d'être publiés comme entités MQTT. Aucun paramètre BMS n'est écrit.
 
 ## Coexistence avec BLE Battery Management (HACS)
 
@@ -143,7 +154,6 @@ smart_docan_bms/
     settings.py      # options MQTT et cadence
     slots.py         # associations BMS -> emplacement, stockées dans /data/slots.json
     discovery.py     # découverte MQTT avec IDs fixes et migration MAC
-    dashboard.py     # interface HTML Ingress
   icon.png           # icône officielle de l'add-on
   logo.png           # logo accepté
   translations/

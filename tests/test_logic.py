@@ -4,8 +4,7 @@ from pathlib import Path
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "smart_docan_bms" / "app"))
 
-from logic import aggregate, device_id, field_spec, normalise_sample
-from dashboard import render
+from logic import aggregate, device_id, field_spec, normalise_sample, voltage_decimals, format_runtime
 from slots import SlotAssignments, slot_entity_id, global_entity_id
 from discovery import battery_discovery, global_discovery, legacy_battery_topics, legacy_global_topics
 import tempfile
@@ -139,6 +138,59 @@ class LogicTests(unittest.TestCase):
         self.assertNotIn("homeassistant/sensor/smart_docan_bms_battery_1_soc/config", topics)
         self.assertIn("homeassistant/sensor/docan_aggregate_battery_level/config", legacy_global_topics())
 
+    def test_voltage_precision_by_measurement_type(self):
+        self.assertEqual(voltage_decimals("voltage"), 2)
+        for key in ("cell_01", "cell_16", "cell_min_voltage",
+                    "cell_max_voltage", "delta_cell_voltage", "voltage_spread"):
+            self.assertEqual(voltage_decimals(key), 3)
+        self.assertIsNone(voltage_decimals("current"))
+
+        sample = {
+            "voltage": 53.1267,
+            "cell_voltages": [3.3, 3.3026] + [3.3014] * 14,
+            "delta_voltage": 0.0026,
+            "runtime": 3725,
+        }
+        data = normalise_sample(sample)
+        self.assertEqual(data["voltage"], 53.13)
+        self.assertEqual(data["cell_01"], 3.300)
+        self.assertEqual(data["cell_02"], 3.303)
+        self.assertEqual(data["cell_min_voltage"], 3.300)
+        self.assertEqual(data["cell_max_voltage"], 3.303)
+        self.assertEqual(data["delta_cell_voltage"], 0.003)
+        self.assertEqual(data["runtime"], 3725)
+        self.assertEqual(data["runtime_text"], "1 h 2 min")
+
+    def test_autonomy_duration_minutes_hours_days_and_unknown(self):
+        for secs, text in (
+            (0, "0 s"), (30, "30 s"), (60, "1 min"),
+            (3599, "59 min"), (3600, "1 h"), (86400, "1 j"),
+            (90061, "1 j 1 h 1 min"), (3 * 86400 + 50, "3 j"),
+        ):
+            self.assertEqual(format_runtime(secs), text)
+        for seconds in (None, False, -10, float("nan"), float("inf")):
+            self.assertIsNone(format_runtime(seconds))
+        self.assertNotIn("runtime_text", normalise_sample({"voltage": 53.12}))
+
+    def test_mqtt_entity_precision_and_fixed_ids(self):
+        for field, precision in (
+            ("voltage", 2), ("cell_01", 3), ("cell_min_voltage", 3),
+            ("cell_max_voltage", 3), ("delta_cell_voltage", 3),
+        ):
+            topic, cfg = battery_discovery(1, "Batterie 1", field, {})
+            self.assertEqual(cfg["suggested_display_precision"], precision)
+            self.assertIn(f"%.{precision}f", cfg["value_template"])
+            self.assertIn("smart_docan_bms_battery_1_", cfg["unique_id"])
+        for key in ("voltage", "voltage_spread"):
+            topic, cfg = global_discovery(key)
+            self.assertEqual(cfg["suggested_display_precision"], 3)
+        topic, cfg = battery_discovery(1, "Batterie 1", "runtime_text", {})
+        self.assertEqual(cfg["unique_id"], "smart_docan_bms_battery_1_runtime_text")
+        self.assertNotIn("unit_of_measurement", cfg)
+        topic, cfg = battery_discovery(1, "Batterie 1", "runtime", {})
+        self.assertEqual(cfg["unique_id"], "smart_docan_bms_battery_1_runtime")
+        self.assertEqual(cfg["unit_of_measurement"], "s")
+
     def test_mqtt_manual_uses_explicit_credentials(self):
         opts = {"mqtt_mode": "manual", "mqtt_host": "core-mosquitto",
                 "mqtt_port": 1883, "mqtt_username": "docan_user",
@@ -177,45 +229,6 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(remaining_poll_delay(12.0, 30), 18.0)
         self.assertEqual(remaining_poll_delay(36.0, 30), 0.0)
         self.assertEqual(remaining_poll_delay(-1.0, 30), 30.0)
-
-    def test_dashboard_refresh_and_polling_are_independent(self):
-        html = render({
-            "batteries": [], "aggregate": {"expected_count": 0, "online_count": 0},
-            "mqtt_connected": False, "poll_seconds": 45,
-            "dashboard_refresh_seconds": 11, "cycle_duration_seconds": 8.4,
-            "last_cycle_period_seconds": 45.5,
-        })
-        self.assertIn('http-equiv="refresh" content="11"', html)
-        self.assertIn("cible 45 s", html)
-        self.assertIn("8.4 s", html)
-        self.assertIn("45.5 s", html)
-
-    def test_render_offline_mqtt_without_exposing_secrets(self):
-        html = render({
-            "batteries": [{"name": "Batterie A", "address": "00:00:00:00:00:01",
-                          "online": True, "data": {"battery_level": 35, "cell_01": 3.3},
-                          "temperature_diagnostic": "Sondes annoncées: 4; données reçues: 0"}],
-            "aggregate": {"online_count": 1, "expected_count": 1, "complete": True},
-            "mqtt_connected": False, "mqtt_target": "core-mosquitto:1883",
-            "mqtt_error": "Connexion TCP impossible", "mqtt_failures": 4,
-        })
-        self.assertIn("MQTT non connecté", html)
-        self.assertIn("core-mosquitto:1883", html)
-        self.assertIn("Connexion TCP impossible", html)
-        self.assertIn("Sondes annoncées: 4", html)
-        self.assertIn("Cellule 1", html)
-        self.assertIn("Autres informations disponibles", html)
-
-    def test_render_html_escapes_bms_data(self):
-        html = render({
-            "batteries": [{"name": "<script>alert(1)</script>", "online": False,
-                           "data": {}, "temperature_diagnostic": "<bad>"}],
-            "aggregate": {"online_count": 0, "expected_count": 1, "complete": False},
-            "mqtt_connected": True,
-        })
-        self.assertNotIn("<script>", html)
-        self.assertNotIn("<bad>", html)
-        self.assertIn("&lt;script&gt;", html)
 
 if __name__ == "__main__":
     unittest.main()

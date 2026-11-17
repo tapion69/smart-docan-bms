@@ -19,7 +19,7 @@ jobs:
       - name: Build Home Assistant add-on Docker image
         run: docker build --pull -t smart-docan-bms:ci smart_docan_bms
       - name: Check runtime dependencies inside built image
-        run: docker run --rm --entrypoint python smart-docan-bms:ci -c "import aiobmsble, bleak, paho.mqtt.client, run, logic, dashboard; print('Python imports OK')"
+        run: docker run --rm --entrypoint python smart-docan-bms:ci -c "import aiobmsble, bleak, paho.mqtt.client, run, logic, discovery; print('Headless Python imports OK')"
       - name: MQTT manual authentication and Discovery against real Mosquitto
         run: |
           mkdir -p .ci-mosquitto
@@ -45,7 +45,8 @@ jobs:
           assert config["options"]["mqtt_mode"] == "auto"
           assert config["schema"]["mqtt_password"] == "password"
           assert config["schema"]["poll_seconds"] == "int(5,300)"
-          assert config["options"]["dashboard_refresh_seconds"] >= 5
-          assert config["ingress_port"] == 1895
+          assert "dashboard_refresh_seconds" not in config["schema"]
+          assert "ingress" not in config
+          assert "ingress_port" not in config
           assert set(config["arch"]) == {"amd64", "aarch64"}
           PY

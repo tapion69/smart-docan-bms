@@ -38,9 +38,6 @@ configuration:
     description: Chaque cycle lit toutes les batteries et publie les valeurs; si les 4 BMS prennent plus longtemps, la cadence sera limitée par le Bluetooth
   rescan_seconds:
     name: Fréquence de recherche des appareils (secondes)
-  dashboard_refresh_seconds:
-    name: Actualisation du tableau de bord (secondes)
-    description: Rafraîchissement de la page web uniquement, indépendant du Bluetooth
   mqtt_mode:
     name: Mode MQTT
     description: auto = identifiants du Supervisor; manual = paramètres saisis ci-dessous
