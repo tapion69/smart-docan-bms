@@ -25,7 +25,6 @@ jobs:
           mkdir -p .ci-mosquitto
           printf '%s\n' 'listener 18884 0.0.0.0' 'allow_anonymous false' 'password_file /mosquitto/config/passwd' > .ci-mosquitto/mosquitto.conf
           docker run --rm -v "$PWD/.ci-mosquitto:/mosquitto/config" eclipse-mosquitto:2 mosquitto_passwd -c -b /mosquitto/config/passwd docan_ci ci-testing-password
-          chmod 644 .ci-mosquitto/passwd
           docker run -d --name docan-ci-mosquitto -p 18884:18884 -v "$PWD/.ci-mosquitto:/mosquitto/config" eclipse-mosquitto:2
           trap 'docker rm -f docan-ci-mosquitto >/dev/null 2>&1 || true' EXIT
           sleep 2
