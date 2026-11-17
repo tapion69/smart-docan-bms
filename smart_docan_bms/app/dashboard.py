@@ -5,10 +5,11 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import threading
+from pathlib import Path
 
 _CSS = """
 *{box-sizing:border-box}body{margin:0;background:#101923;color:#f1f5fa;font:15px system-ui,Arial;padding:22px}
-h1{margin:0 0 4px;font-size:24px}.muted{color:#96a6b8}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin-top:16px}
+h1{margin:0 0 4px;font-size:24px}.app-brand{display:flex;align-items:center;gap:12px}.app-brand img{width:52px;height:52px;object-fit:contain;border-radius:10px}.muted{color:#96a6b8}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin-top:16px}
 .card{background:#192733;border:1px solid #304150;border-radius:14px;padding:18px;min-width:0}
 .good{color:#5dd3ac}.bad{color:#ff8d92}.chips{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .chip{background:#253545;border-radius:8px;padding:12px;min-width:0}
@@ -39,6 +40,7 @@ def render(snapshot: dict) -> str:
     for item in records:
         d = item.get("data") or {}
         name = escape(item.get("name") or item.get("address") or "BMS")
+        slot = item.get("slot")
         state = "En ligne" if item.get("online") else "Hors ligne"
         hue = "good" if item.get("online") else "bad"
         chips = "".join(
@@ -77,6 +79,10 @@ def render(snapshot: dict) -> str:
             f"<div><dt>{title}</dt><dd>{fmt(d[key], unit)}</dd></div>"
             for key, title, unit in detail_fields if key in d
         )
+        if slot:
+            details += (f"<div><dt>Emplacement fixe</dt><dd>{int(slot)}</dd></div>"
+                        f"<div><dt>Adresse Bluetooth associée</dt>"
+                        f"<dd>{escape(str(item.get('address') or '—'))}</dd></div>")
         temp_debug = escape(item.get("temperature_diagnostic") or "Données non renseignées")
         cards.append(
             f'<section class="card"><h2>{name} <span class="{hue} tag">• {state}</span></h2>'
@@ -126,7 +132,9 @@ def render(snapshot: dict) -> str:
         '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f'<meta http-equiv="refresh" content="{refresh_seconds}"><title>Smart Docan BMS</title>'
-        f'<style>{_CSS}</style></head><body><h1>Smart Docan BMS</h1>{head}'
+        f'<style>{_CSS}</style></head><body>'
+        '<div class="app-brand"><img src="logo.png" alt="Smart Docan BMS">'
+        f'<h1>Smart Docan BMS</h1></div>{head}'
         f'<main class="grid">{"".join(cards)}</main>'
         '<p class="muted footer">Données indicatives : ne pas utiliser pour une protection de batterie.</p></body></html>'
     )
@@ -138,6 +146,9 @@ def start_dashboard(snapshot_callable, port: int = 1895) -> ThreadingHTTPServer:
             if self.path.rstrip("/").endswith("/health"):
                 content = json.dumps({"status": "ok"}).encode()
                 mime = "application/json"
+            elif self.path.rstrip("/").endswith("/logo.png"):
+                content = Path("/app/logo.png").read_bytes()
+                mime = "image/png"
             else:
                 content = render(snapshot_callable()).encode("utf-8")
                 mime = "text/html; charset=utf-8"

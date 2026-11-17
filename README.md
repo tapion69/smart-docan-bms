@@ -2,7 +2,7 @@
 
 Add-on **Home Assistant OS / Supervised** pour les batteries **Docan Power NOON équipées d'un BMS Daren** diffusant un nom Bluetooth commençant par `DWF`.
 
-> **Statut : 0.1.2-dev — développement, validé sur une première installation à 4 batteries.**
+> **Statut : 0.1.3-dev — développement, validé sur une première installation à 4 batteries.**
 > La lecture des 64 cellules a été confirmée sur cette installation. La connexion MQTT reste à valider sur le matériel cible après configuration manuelle.
 > Ce projet n'effectue aucune commande de configuration des BMS : uniquement des requêtes de télémétrie. Il ne remplace **jamais** les protections du BMS.
 
@@ -29,13 +29,49 @@ Add-on **Home Assistant OS / Supervised** pour les batteries **Docan Power NOON 
 
 Le Supervisor installe uniquement depuis la branche principale de ce dépôt. Les branches de développement nécessitent une fusion dans `main` avant de pouvoir être installées par URL.
 
+## Identifiants fixes (depuis 0.1.3-dev)
+
+Les **`unique_id`** MQTT ne sont plus dérivés de l'adresse MAC Bluetooth. Ils sont désormais liés à l'emplacement logique de la batterie (slot) et identiques d'une installation à l'autre.
+
+| Exemple de mesure | Unique ID et `default_entity_id` conseillé |
+| --- | --- |
+| Batterie 1, SOC | `smart_docan_bms_battery_1_soc` / `sensor.smart_docan_bms_battery_1_soc` |
+| Batterie 1, tension | `smart_docan_bms_battery_1_voltage` / `sensor.smart_docan_bms_battery_1_voltage` |
+| Batterie 1, cellule 01 | `smart_docan_bms_battery_1_cell_01` / `sensor.smart_docan_bms_battery_1_cell_01` |
+| Batterie 4, cellule 16 | `smart_docan_bms_battery_4_cell_16` / `sensor.smart_docan_bms_battery_4_cell_16` |
+| Global, SOC | `smart_docan_bms_global_soc` / `sensor.smart_docan_bms_global_soc` |
+
+Le `default_entity_id` est **une suggestion à la première création** : Home Assistant peut ajouter un suffixe si un identifiant est déjà utilisé ou si l'utilisateur l'a renommé. Le `unique_id`, lui, reste fixe par slot et par mesure.
+
+**Association des batteries :** au premier démarrage, l'add-on attribue les BMS `DWF` découverts aux emplacements libres 1–4 puis sauvegarde les correspondances Bluetooth dans `/data/slots.json`. Le fichier survit aux mises à jour et redémarrages, même si une batterie disparaît temporairement du scan. Un nouvel appareil **ne remplace jamais automatiquement** une batterie déjà affectée.
+
+Si l'ordre physique importe, renseigner **`slot_1_address` à `slot_4_address`** dans la configuration (l'adresse MAC n'est jamais écrite dans GitHub). Une adresse configurée manuellement prend priorité sur une attribution automatique; on peut également changer les noms des quatre emplacements.
+
+`strict_slots: true` interdit l'attribution de tout BMS non déjà associé. Avec `false`, la découverte des nouveaux BMS `DWF` reste automatique dans les slots disponibles.
+
+### Migration depuis la version basée sur les MAC
+
+Par défaut, `migrate_legacy_entities: true` publie les nouveaux capteurs MQTT fixes et **supprime ensuite du broker les anciennes annonces MQTT retenues** liées à l'adresse MAC et les anciennes entités globales. Les anciennes entités peuvent donc disparaître de Home Assistant, et les anciennes références de dashboard / automatisations doivent être adaptées. Les historiques ne sont pas transférés automatiquement d'un `unique_id` à l'autre.
+
+Pour conserver temporairement les anciennes entités (par exemple, pendant une migration de dashboard), placer `migrate_legacy_entities: false` **avant** le premier lancement de 0.1.3-dev. Cela conserve les anciennes annonces retenues du broker mais peut afficher des entités obsolètes ou indisponibles; il faudra les nettoyer ensuite.
+
+**Sauvegarde recommandée :** effectuer une sauvegarde Home Assistant avant le changement de version. Ne pas supprimer `/data/slots.json` pendant les mises à jour.
+
+## Logo
+
+Le logo choisi pour Smart Docan BMS (batterie à quatre cellules vertes, connexion Bluetooth bleue et courbe de télémétrie) est intégré sous `smart_docan_bms/icon.png` et `smart_docan_bms/logo.png`. Il apparaît dans la boutique et la page de l'add-on ainsi que dans le tableau de bord Ingress.
+
 ## Options
 
 | Option | Exemple | Rôle |
 | --- | --- | --- |
 | `auto_discover` | `true` | Trouve automatiquement les appareils `DWF*` |
+| `strict_slots` | `false` | Ne pas attribuer automatiquement de nouveaux BMS lorsqu'activé |
+| `migrate_legacy_entities` | `true` | Supprime les anciennes découvertes MQTT après publication des nouveaux ID |
+| `slot_1_address` à `slot_4_address` | `""` | Adresses Bluetooth optionnelles fixées par emplacement |
+| `slot_1_name` à `slot_4_name` | `Batterie 1`… | Noms personnalisés des batteries |
 | `addresses` | `""` | Liste optionnelle d'adresses Bluetooth séparées par virgules ou points-virgules ; si remplie, seuls ces appareils sont interrogés |
-| `names` | `""` | Alias optionnels : `AA:BB:CC:DD:EE:FF=Batterie 1;11:22:33:44:55:66=Batterie 2` |
+| `names` | `""` | Ancienne option conservée pour compatibilité (utiliser désormais `slot_1_name` à `slot_4_name`) |
 | `scan_seconds` | `8` | Durée d'une recherche BLE |
 | `rescan_seconds` | `180` | Intervalle entre deux recherches BLE |
 | `poll_seconds` | `30` | Période cible entre débuts des cycles de lecture complets. Inclut le temps BLE (min 10 s) |
@@ -105,7 +141,11 @@ smart_docan_bms/
     run.py           # boucle Bluetooth et MQTT
     logic.py         # traitement des données
     settings.py      # options MQTT et cadence
+    slots.py         # associations BMS -> emplacement, stockées dans /data/slots.json
+    discovery.py     # découverte MQTT avec IDs fixes et migration MAC
     dashboard.py     # interface HTML Ingress
+  icon.png           # icône officielle de l'add-on
+  logo.png           # logo accepté
   translations/
     fr.yaml
     en.yaml

@@ -19,8 +19,13 @@ from bleak import BleakScanner
 import paho.mqtt.client as mqtt
 
 from dashboard import start_dashboard
-from logic import aggregate, device_id, field_spec, normalise_sample
+from logic import aggregate, normalise_sample
+from discovery import (
+    GLOBAL_FIELDS, battery_discovery, global_discovery,
+    legacy_battery_topics, legacy_global_topics,
+)
 from settings import mqtt_settings, remaining_poll_delay
+from slots import SlotAssignments, MAX_SLOTS, slot_device_id
 
 LOG = logging.getLogger("smart_docan")
 OPTIONS = Path("/data/options.json")
@@ -43,7 +48,8 @@ def parse_names(text: str) -> dict[str, str]:
 def load_options() -> dict:
     defaults = {
         "auto_discover": True, "addresses": "", "names": "", "scan_seconds": 8,
-        "poll_seconds": 30, "rescan_seconds": 180, "log_level": "info"
+        "poll_seconds": 30, "rescan_seconds": 180, "log_level": "info",
+        "strict_slots": False, "migrate_legacy_entities": True,
     }
     if OPTIONS.exists():
         defaults.update(json.loads(OPTIONS.read_text(encoding="utf-8")))
@@ -83,16 +89,24 @@ class Store:
         self.mqtt_error = "Connexion en attente"
         self.mqtt_failures = 0
 
-    def scan(self, address: str, name: str, rssi: int | None):
+    def register_slot(self, slot: int, address: str, name: str) -> None:
+        """Create offline placeholders for configured slots (never report 3/3 for 4 expected)."""
         with self.lock:
-            rec = self.batteries.setdefault(
-                address, {"address": address, "name": name, "online": False,
-                          "failures": 0, "last_seen": None, "error": None, "data": {},
-                          "info": {}}
-            )
-            rec["name"] = name
+            rec = self.batteries.setdefault(address, {
+                "address": address, "name": name, "slot": slot, "online": False,
+                "failures": 0, "last_seen": None, "error": None, "data": {},
+                "info": {},
+            })
+            rec.update(slot=slot, name=name)
+            self._refresh()
+
+    def scan(self, address: str, name: str, rssi: int | None, slot: int | None = None):
+        with self.lock:
+            if slot is None and address not in self.batteries:
+                return
+            self.register_slot(slot or self.batteries[address]["slot"], address, name)
             if rssi is not None:
-                rec["rssi"] = rssi
+                self.batteries[address]["rssi"] = rssi
 
     def success(self, address: str, data: dict, info: dict, temperature_diagnostic: str = ""):
         with self.lock:
@@ -136,7 +150,7 @@ class Store:
         with self.lock:
             # read-only JSON clone eliminates mutation while HTTP formats the page
             return json.loads(json.dumps({
-                "batteries": sorted(self.batteries.values(), key=lambda x: x["address"]),
+                "batteries": sorted(self.batteries.values(), key=lambda x: x.get("slot", 99)),
                 "aggregate": self.aggregate,
                 "mqtt_connected": self.mqtt_connected,
                 "mqtt_target": self.mqtt_target,
@@ -150,9 +164,12 @@ class Store:
             }))
 
 class MQTTBridge:
-    def __init__(self, settings: dict, store: Store):
+    def __init__(self, settings: dict, store: Store, migrate_legacy: bool = True):
         self.store = store
         self.announced: set[str] = set()
+        self.migrate_legacy = migrate_legacy
+        self.legacy_cleaned: set[str] = set()
+        self.old_global_cleaned = False
         # Don't display or log the credentials returned by Supervisor.
         store.mqtt_target = f"{settings['host']}:{int(settings.get('port', 1883))} (TLS: {'oui' if settings.get('ssl') else 'non'}, mode {settings.get('mode', 'auto')})"
         store.mqtt_error = "Connexion initiale en cours"
@@ -180,6 +197,8 @@ class MQTTBridge:
         # int(ReasonCode) raises TypeError and previously killed the MQTT worker.
         self.store.mqtt_connected = getattr(reason_code, "value", reason_code) == 0
         self.announced.clear()
+        self.legacy_cleaned.clear()
+        self.old_global_cleaned = False
         if self.store.mqtt_connected:
             self.store.mqtt_error = ""
             self.store.mqtt_failures = 0
@@ -211,97 +230,54 @@ class MQTTBridge:
         msg = json.dumps(payload, ensure_ascii=False, allow_nan=False) if isinstance(payload, dict) else payload
         self.client.publish(topic, msg, qos=1, retain=retain)
 
-    def entity(self, address: str, name: str, key: str, data: dict, info: dict):
-        spec = field_spec(key)
-        if not spec:
+    def entity(self, slot: int, name: str, key: str, info: dict) -> None:
+        result = battery_discovery(slot, name, key, info)
+        if not result:
             return
-        label, unit, device_class, state_class, category, kind = spec
-        ident = device_id(address)
-        uid = f"{ident}_{key}"
-        if uid in self.announced:
-            return
-        base = f"{PREFIX}/{ident}"
-        dev = {
-            "identifiers": [ident],
-            "name": name,
-            "manufacturer": info.get("manufacturer", "Daren"),
-            "model": info.get("model", "Docan Power NOON (Daren BLE)"),
-        }
-        if info.get("fw_version"):
-            dev["sw_version"] = str(info["fw_version"])
-        config = {
-            "name": label,
-            "unique_id": f"smart_{uid}",
-            "device": dev,
-            "state_topic": f"{base}/state",
-            "availability_topic": f"{base}/availability",
-            "payload_available": "online",
-            "payload_not_available": "offline",
-        }
-        if kind == "binary_sensor":
-            config["value_template"] = (
-                "{{ 'ON' if value_json.get('" + key + "') else 'OFF' }}"
-            )
-            config["payload_on"] = "ON"
-            config["payload_off"] = "OFF"
-        else:
-            config["value_template"] = "{{ value_json.get('" + key + "') }}"
-            if unit:
-                config["unit_of_measurement"] = unit
-            if state_class:
-                config["state_class"] = state_class
-        if device_class:
-            config["device_class"] = device_class
-        if category:
-            config["entity_category"] = category
-        self.publish(f"homeassistant/{kind}/{uid}/config", config)
-        if self.store.mqtt_connected:
-            self.announced.add(uid)
+        topic, config = result
+        uid = config["unique_id"]
+        if uid not in self.announced:
+            self.publish(topic, config)
+            if self.store.mqtt_connected:
+                self.announced.add(uid)
 
-    def battery(self, rec: dict):
-        address, name, data = rec["address"], rec["name"], rec["data"]
-        base = f"{PREFIX}/{device_id(address)}"
+    def battery(self, rec: dict) -> None:
+        """Publish only data for a persistent logical slot."""
+        slot = rec.get("slot")
+        if not slot:
+            return
+        address, name, data = rec["address"], rec["name"], rec.get("data") or {}
+        base = f"{PREFIX}/{slot_device_id(slot)}"
         for key in data:
-            self.entity(address, name, key, data, rec.get("info") or {})
-        self.publish(f"{base}/state", data)
+            self.entity(slot, name, key, rec.get("info") or {})
+        if data:
+            self.publish(f"{base}/state", data)
         self.publish(f"{base}/availability", "online" if rec["online"] else "offline")
+        # Delete retained MAC-based discovery *after* new fixed-slot entities exist.
+        if self.store.mqtt_connected and data and self.migrate_legacy and address not in self.legacy_cleaned:
+            for topic in legacy_battery_topics(address):
+                self.publish(topic, "")
+            self.legacy_cleaned.add(address)
+            LOG.info("%s : migration MQTT des anciens ID Bluetooth effectuée", name)
 
-    def summary(self, summary: dict):
-        uid = "docan_aggregate"
-        base = f"{PREFIX}/{uid}"
+    def summary(self, summary: dict) -> None:
+        base = f"{PREFIX}/global"
         if summary.get("complete"):
-            for key, label, unit, device_class in (
-                ("battery_level", "SOC global estimé", "%", "battery"),
-                ("voltage", "Tension moyenne", "V", "voltage"),
-                ("current", "Courant total", "A", "current"),
-                ("power", "Puissance totale", "W", "power"),
-                ("stored_energy_wh", "Énergie stockée estimée", "Wh", "energy"),
-                ("voltage_spread", "Écart tensions batteries", "V", "voltage"),
-                ("online_count", "Batteries en ligne", None, None),
-            ):
+            for key, *_ in GLOBAL_FIELDS:
                 if key not in summary:
                     continue
-                entity_id = f"{uid}_{key}"
-                if entity_id not in self.announced:
-                    cfg = {
-                        "name": label, "unique_id": f"smart_{entity_id}",
-                        "device": {"identifiers": [uid], "name": "Docan Power - Global",
-                                   "manufacturer": "Smart Docan BMS",
-                                   "model": "Synthèse des batteries en parallèle"},
-                        "state_topic": f"{base}/state",
-                        "value_template": "{{ value_json.get('" + key + "') }}",
-                        "availability_topic": f"{base}/availability",
-                        "payload_available": "online", "payload_not_available": "offline",
-                    }
-                    if unit:
-                        cfg["unit_of_measurement"] = unit
-                        cfg["state_class"] = "measurement"
-                    if device_class:
-                        cfg["device_class"] = device_class
-                    self.publish(f"homeassistant/sensor/{entity_id}/config", cfg)
+                topic, config = global_discovery(key)
+                uid = config["unique_id"]
+                if uid not in self.announced:
+                    self.publish(topic, config)
                     if self.store.mqtt_connected:
-                        self.announced.add(entity_id)
+                        self.announced.add(uid)
             self.publish(f"{base}/state", summary)
+            if self.store.mqtt_connected and self.migrate_legacy and not self.old_global_cleaned:
+                for topic in legacy_global_topics():
+                    self.publish(topic, "")
+                self.old_global_cleaned = True
+                LOG.info("Migration MQTT des anciennes entités globales effectuée")
         self.publish(f"{base}/availability", "online" if summary.get("complete") else "offline")
 
     def stop(self):
@@ -315,14 +291,18 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.2-dev — lecture seule, Bluetooth Daren")
+    LOG.info("Smart Docan BMS 0.1.3-dev — slots persistants, lecture seule, Bluetooth Daren")
     wanted = parse_addresses(settings.get("addresses", ""))
-    labels = parse_names(settings.get("names", ""))
-    if not settings.get("auto_discover", True) and not wanted:
-        LOG.warning("Découverte automatique désactivée et aucune adresse configurée")
+    slots = SlotAssignments(Path("/data/slots.json"), settings)
+    if not settings.get("auto_discover", True) and not wanted and not slots.configured():
+        LOG.warning("Aucun slot Bluetooth n'est configuré, découverte automatique désactivée")
+    for slot, address in slots.configured():
+        LOG.info("Emplacement réservé : batterie %d", slot)
     polling = int(settings["poll_seconds"])
     refresh = int(settings.get("dashboard_refresh_seconds", 20))
     store = Store(poll_seconds=polling, dashboard_refresh_seconds=refresh)
+    for slot, address in slots.configured():
+        store.register_slot(slot, address, slots.get_name(slot))
     start_dashboard(store.snapshot)
     bridge: MQTTBridge | None = None
     next_mqtt_attempt = 0.0
@@ -335,8 +315,11 @@ async def run() -> None:
     scan_seconds = int(settings["scan_seconds"])
     rescan = int(settings["rescan_seconds"])
     async def read_one(address: str, device, rssi):
-        name = labels.get(address, device.name or address)
-        store.scan(address, name, rssi)
+        slot = slots.slot_for(address)
+        if slot is None:
+            return
+        name = slots.get_name(slot)
+        store.scan(address, name, rssi, slot)
         bms = BMS(ble_device=device, config=BMSConfig(keep_alive=True))
         try:
             async with bms:
@@ -383,7 +366,10 @@ async def run() -> None:
                     # In manual mode there is no Supervisor MQTT lookup.
                     service = mqtt_credentials() if settings.get("mqtt_mode", "auto") == "auto" else None
                     mqtt_config = mqtt_settings(settings, service)
-                    bridge = MQTTBridge(mqtt_config, store)
+                    bridge = MQTTBridge(
+                        mqtt_config, store,
+                        migrate_legacy=bool(settings.get("migrate_legacy_entities", True)),
+                    )
                 except Exception as exc:
                     # MQTT failure must never stop Bluetooth telemetry or web UI.
                     store.mqtt_connected = False
@@ -397,30 +383,45 @@ async def run() -> None:
             if time.monotonic() >= next_scan:
                 try:
                     found = await BleakScanner.discover(timeout=scan_seconds, return_adv=True)
-                    count = 0
+                    eligible: dict[str, tuple] = {}
+                    reserved_addresses = {address for _, address in slots.configured()}
                     for device, adv in found.values():
                         name = (adv.local_name or device.name or "").strip()
                         address = device.address.upper()
                         if not MAC_RE.fullmatch(address):
                             continue
-                        if (wanted and address not in wanted) or (
-                            not wanted and (not settings["auto_discover"] or not name.startswith("DWF"))
-                        ):
+                        # Previously bound batteries always remain eligible, including
+                        # when a BMS advertises with an empty/changed name.
+                        if address in reserved_addresses:
+                            pass
+                        elif wanted:
+                            if address not in wanted:
+                                continue
+                        elif not settings.get("auto_discover", True) or not name.startswith("DWF"):
                             continue
-                        # With an explicit address allow different advertisement names.
-                        if not wanted and not name.startswith("DWF"):
-                            continue
-                        devices[address] = (device, adv.rssi)
-                        store.scan(address, labels.get(address, name), adv.rssi)
-                        count += 1
+                        eligible[address] = (device, adv.rssi)
+                    assigned = slots.bind_discovered(set(eligible))
+                    for address, slot in assigned.items():
+                        device, rssi = eligible[address]
+                        store.scan(address, slots.get_name(slot), rssi, slot)
+                        devices[address] = (device, rssi)
+                    # Any configured, but unseen, slot stays offline and retains its ID.
+                    count = len(assigned)
                     LOG.info("Bluetooth : %d BMS détecté(s) pendant cette recherche, %d connus", count, len(devices))
                 except Exception as exc:
                     LOG.warning("Recherche Bluetooth indisponible (%s) : vérifier host_dbus", type(exc).__name__)
                 next_scan = time.monotonic() + rescan
-            for address, (device, rssi) in sorted(devices.items()):
+            for address, (device, rssi) in sorted(
+                devices.items(), key=lambda p: slots.slot_for(p[0]) or 99
+            ):
                 await read_one(address, device, rssi)
             if bridge is not None:
-                bridge.summary(store.snapshot()["aggregate"])
+                snapshot = store.snapshot()
+                # Publish offline availability even for currently missing assigned slots.
+                for rec in snapshot["batteries"]:
+                    if not rec["online"]:
+                        bridge.battery(rec)
+                bridge.summary(snapshot["aggregate"])
             elapsed = time.monotonic() - cycle_started
             store.cycle_finished(elapsed)
             remaining = remaining_poll_delay(elapsed, polling)

@@ -1,4 +1,27 @@
 configuration:
+  strict_slots:
+    name: Emplacements stricts
+    description: Seules les batteries déjà associées aux emplacements sont lues, sans attribution automatique de nouveaux appareils
+  migrate_legacy_entities:
+    name: Nettoyer les anciens capteurs MQTT
+    description: Supprimer du broker les découvertes retenues basées sur les adresses MAC après création des nouvelles entités fixes
+  slot_1_address:
+    name: Batterie 1 - adresse Bluetooth (facultatif)
+    description: Laisser vide pour la première attribution automatique, puis association sauvegardée durablement
+  slot_1_name:
+    name: Batterie 1 - nom
+  slot_2_address:
+    name: Batterie 2 - adresse Bluetooth (facultatif)
+  slot_2_name:
+    name: Batterie 2 - nom
+  slot_3_address:
+    name: Batterie 3 - adresse Bluetooth (facultatif)
+  slot_3_name:
+    name: Batterie 3 - nom
+  slot_4_address:
+    name: Batterie 4 - adresse Bluetooth (facultatif)
+  slot_4_name:
+    name: Batterie 4 - nom
   auto_discover:
     name: Découverte automatique Bluetooth
     description: Rechercher automatiquement tous les BMS DWF détectés
