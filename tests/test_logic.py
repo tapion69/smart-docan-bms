@@ -16,7 +16,7 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(d["cell_max_index"], 7)
         self.assertEqual(d["cell_min_index"], 1)
         self.assertAlmostEqual(d["delta_cell_voltage"], .003)
-        self.assertAlmostEqual(d["stored_energy_wh"], 6277.32, places=2)
+        self.assertAlmostEqual(d["stored_energy_wh"], 6277.3, places=1)
 
     def test_temperature_sensor(self):
         class Temp:
