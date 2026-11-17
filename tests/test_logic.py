@@ -6,6 +6,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "smart_docan_bms" /
 
 from logic import aggregate, device_id, field_spec, normalise_sample
 from dashboard import render
+from slots import SlotAssignments, slot_entity_id, global_entity_id
+from discovery import battery_discovery, global_discovery, legacy_battery_topics, legacy_global_topics
+import tempfile
 from settings import mqtt_settings, remaining_poll_delay
 
 class LogicTests(unittest.TestCase):
@@ -69,6 +72,69 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(device_id("AA:BB:CC:DD:EE:FF"), "docan_aabbccddeeff")
         self.assertEqual(field_spec("cell_16")[0], "Tension cellule 16")
         self.assertIsNone(field_spec("temp_type_01"))
+
+    def test_logical_ids_independent_of_mac(self):
+        for mac in ("AA:BB:CC:DD:EE:FF", "11:22:33:44:55:66"):
+            with tempfile.TemporaryDirectory() as folder:
+                mapping = SlotAssignments(Path(folder) / "slots.json", {})
+                mapping.bind_discovered([mac])
+                self.assertEqual(mapping.slot_for(mac), 1)
+                topic, entity = battery_discovery(1, "Batterie 1", "battery_level", {})
+                self.assertEqual(topic, "homeassistant/sensor/smart_docan_bms_battery_1_soc/config")
+                self.assertEqual(entity["unique_id"], "smart_docan_bms_battery_1_soc")
+                self.assertEqual(entity["default_entity_id"], "sensor.smart_docan_bms_battery_1_soc")
+                self.assertEqual(entity["state_topic"], "smart_docan_bms/smart_docan_bms_battery_1/state")
+                self.assertNotIn(mac.replace(":", "").lower(), str(entity))
+
+    def test_persistent_slots_not_reassigned_after_restart(self):
+        a, b, c = "11:22:33:44:55:66", "22:33:44:55:66:77", "33:44:55:66:77:88"
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "slots.json"
+            slots = SlotAssignments(path, {})
+            self.assertEqual(slots.bind_discovered([b, a]), {a: 1, b: 2})
+            reload = SlotAssignments(path, {})
+            self.assertEqual(reload.slot_for(b), 2)
+            self.assertEqual(reload.bind_discovered([c]), {c: 3})
+            self.assertEqual(reload.slot_for(a), 1)
+            self.assertEqual(SlotAssignments(path, {}).slot_for(b), 2)
+
+    def test_strict_slots_no_unassigned_devices(self):
+        a, b = "11:22:33:44:55:66", "22:33:44:55:66:77"
+        with tempfile.TemporaryDirectory() as folder:
+            slots = SlotAssignments(Path(folder) / "slots.json",
+                                    {"strict_slots": True, "slot_3_address": a})
+            self.assertEqual(slots.bind_discovered([a, b]), {a: 3})
+            self.assertEqual(slots.slot_for(b), None)
+            self.assertEqual(slots.get_name(3), "Batterie 3")
+
+    def test_slots_explicit_override_and_duplicate_rejected(self):
+        a, b = "11:22:33:44:55:66", "22:33:44:55:66:77"
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "slots.json"
+            SlotAssignments(path, {"slot_1_address": a})
+            updated = SlotAssignments(path, {"slot_1_address": b})
+            self.assertEqual(updated.slot_for(b), 1)
+            self.assertEqual(updated.slot_for(a), None)
+            with self.assertRaisesRegex(ValueError, "deux batteries"):
+                SlotAssignments(path, {"slot_2_address": b})
+
+    def test_global_and_binary_unique_ids(self):
+        topic, cfg = global_discovery("battery_level")
+        self.assertEqual(topic, "homeassistant/sensor/smart_docan_bms_global_soc/config")
+        self.assertEqual(cfg["unique_id"], "smart_docan_bms_global_soc")
+        self.assertEqual(cfg["default_entity_id"], "sensor.smart_docan_bms_global_soc")
+        topic2, cfg2 = battery_discovery(4, "Batterie 4", "problem", {})
+        self.assertEqual(topic2, "homeassistant/binary_sensor/smart_docan_bms_battery_4_problem/config")
+        self.assertEqual(cfg2["default_entity_id"], "binary_sensor.smart_docan_bms_battery_4_problem")
+        self.assertEqual(cfg2["unique_id"], "smart_docan_bms_battery_4_problem")
+
+    def test_legacy_cleanup_targets_only_old_ids(self):
+        topics = legacy_battery_topics("AA:BB:CC:DD:EE:FF")
+        self.assertIn("homeassistant/sensor/docan_aabbccddeeff_battery_level/config", topics)
+        self.assertIn("homeassistant/sensor/docan_aabbccddeeff_cell_16/config", topics)
+        self.assertIn("homeassistant/binary_sensor/docan_aabbccddeeff_problem/config", topics)
+        self.assertNotIn("homeassistant/sensor/smart_docan_bms_battery_1_soc/config", topics)
+        self.assertIn("homeassistant/sensor/docan_aggregate_battery_level/config", legacy_global_topics())
 
     def test_mqtt_manual_uses_explicit_credentials(self):
         opts = {"mqtt_mode": "manual", "mqtt_host": "core-mosquitto",
