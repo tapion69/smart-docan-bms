@@ -1,6 +1,6 @@
 name: Smart Docan BMS
 slug: smart_docan_bms
-version: "0.1.3-dev"
+version: "0.1.4-dev"
 description: Lecture Bluetooth des BMS Daren / Docan Power NOON (MQTT et tableau de bord)
 url: https://github.com/tapion69/smart-docan-bms
 arch:
@@ -55,7 +55,7 @@ schema:
   addresses: str?
   names: str?
   scan_seconds: int(4,20)
-  poll_seconds: int(10,300)
+  poll_seconds: int(5,300)
   rescan_seconds: int(60,3600)
   dashboard_refresh_seconds: int(5,120)
   mqtt_mode: list(auto|manual)
