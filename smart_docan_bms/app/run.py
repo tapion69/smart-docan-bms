@@ -310,7 +310,6 @@ async def run() -> None:
     rescan = int(settings["rescan_seconds"])
     missing_rescan = int(settings.get("missing_rescan_seconds", 30))
     last_attempts: dict[str, float] = {}
-    last_observed: dict[str, float] = {}
     previous_missing_slots: set[int] = set()
     LOG.info("Recherche BLE normale %d s, recherche si batterie absente %d s",
              rescan, missing_rescan)
@@ -323,18 +322,20 @@ async def run() -> None:
         store.scan(address, name, rssi, slot)
         bms = BMS(ble_device=device, config=BMSConfig(keep_alive=True))
         try:
-            async with bms:
-                sample = await bms.async_update()
-                if not sample:
-                    raise ValueError("Trame BMS vide")
-                if address not in known_info:
-                    try:
-                        info = await bms.device_info()
-                        known_info[address] = dict(info)
-                    except Exception as exc:
-                        # Some firmware variants expose measurements but no device info.
-                        LOG.info("Informations firmware indisponibles pour %s : %s", name, type(exc).__name__)
-                        known_info[address] = {}
+            # A stalled BMS must not block all other packs indefinitely.
+            async with asyncio.timeout(30):
+                async with bms:
+                    sample = await bms.async_update()
+                    if not sample:
+                        raise ValueError("Trame BMS vide")
+                    if address not in known_info:
+                        try:
+                            info = await bms.device_info()
+                            known_info[address] = dict(info)
+                        except Exception as exc:
+                            # Firmware info may be unavailable although readings work.
+                            LOG.info("Informations firmware indisponibles pour %s : %s", name, type(exc).__name__)
+                            known_info[address] = {}
             data = normalise_sample(sample, rssi)
             temperature_format = "temp_values" if "temp_values" in sample else "temperature"
             raw_temps = sample.get(temperature_format)
@@ -345,7 +346,11 @@ async def run() -> None:
                 f"sondes décodées: {count}; moyenne: {scalar if scalar is not None else '?'}; "
                 f"source: {temperature_format}"
             )
+            previously_seen = bool(store.batteries[address].get("last_seen"))
+            was_offline = not store.batteries[address].get("online")
             store.success(address, data, known_info[address], temp_diagnostic)
+            if was_offline and previously_seen:
+                LOG.info("%s : communication Bluetooth rétablie automatiquement", name)
             if count == 0:
                 LOG.info("%s : températures absentes du décodage (%s)", name, temp_diagnostic)
             LOG.info("%s : SOC %s %% ; %s V ; %s cellules",
@@ -408,7 +413,6 @@ async def run() -> None:
                         store.scan(address, slots.get_name(slot), rssi, slot)
                         # Replace old BlueZ object with a fresh discovered device.
                         devices[address] = (device, rssi)
-                        last_observed[address] = time.monotonic()
 
                     missing = set(missing_slots(slots.configured(), set(assigned)))
                     newly_missing = missing - previous_missing_slots
@@ -450,7 +454,7 @@ async def run() -> None:
                 else:
                     last_attempts[address] = time.monotonic()
                     failures = store.batteries[address]["failures"]
-                    if failures >= 2:
+                    if failures >= 3:
                         # The BLEDevice's BlueZ path might be stale. Force a fresh
                         # advertisement before connecting again; do not reset hci0.
                         devices.pop(address, None)
