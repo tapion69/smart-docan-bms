@@ -114,10 +114,12 @@ class LogicTests(unittest.TestCase):
             "batteries": [], "aggregate": {"expected_count": 0, "online_count": 0},
             "mqtt_connected": False, "poll_seconds": 45,
             "dashboard_refresh_seconds": 11, "cycle_duration_seconds": 8.4,
+            "last_cycle_period_seconds": 45.5,
         })
         self.assertIn('http-equiv="refresh" content="11"', html)
         self.assertIn("cible 45 s", html)
         self.assertIn("8.4 s", html)
+        self.assertIn("45.5 s", html)
 
     def test_render_offline_mqtt_without_exposing_secrets(self):
         html = render({
