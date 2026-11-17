@@ -71,7 +71,7 @@ Le logo choisi pour Smart Docan BMS (batterie à quatre cellules vertes, connexi
 | `slot_1_address` à `slot_4_address` | `""` | Adresses Bluetooth optionnelles fixées par emplacement |
 | `slot_1_name` à `slot_4_name` | `Batterie 1`… | Noms personnalisés des batteries |
 | `addresses` | `""` | Liste optionnelle d'adresses Bluetooth séparées par virgules ou points-virgules ; si remplie, seuls ces appareils sont interrogés |
-| `names` | `""` | Alias optionnels : `AA:BB:CC:DD:EE:FF=Batterie 1;11:22:33:44:55:66=Batterie 2` |
+| `names` | `""` | Ancienne option conservée pour compatibilité (utiliser désormais `slot_1_name` à `slot_4_name`) |
 | `scan_seconds` | `8` | Durée d'une recherche BLE |
 | `rescan_seconds` | `180` | Intervalle entre deux recherches BLE |
 | `poll_seconds` | `30` | Période cible entre débuts des cycles de lecture complets. Inclut le temps BLE (min 10 s) |
