@@ -34,9 +34,6 @@ configuration:
     description: Each cycle reads all batteries and publishes measurements; BLE duration can limit throughput
   rescan_seconds:
     name: Device rescan interval (seconds)
-  dashboard_refresh_seconds:
-    name: Dashboard refresh interval (seconds)
-    description: Web page refresh only, independent of BMS polling
   mqtt_mode:
     name: MQTT connection mode
     description: auto = Supervisor credentials; manual = credentials entered below
