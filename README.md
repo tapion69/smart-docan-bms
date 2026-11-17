@@ -2,11 +2,11 @@
 
 Add-on **Home Assistant OS / Supervised** pour les batteries **Docan Power NOON équipées d'un BMS Daren** diffusant un nom Bluetooth commençant par `DWF`.
 
-> **Statut : 0.1.0-dev — première version à tester sur matériel réel.**
+> **Statut : 0.1.1-dev — première version à tester sur matériel réel.**
 > La connexion à quatre batteries n'a pas encore été validée sur l'installation cible.
 > Ce projet n'effectue aucune commande de configuration des BMS : uniquement des requêtes de télémétrie. Il ne remplace **jamais** les protections du BMS.
 
-## Fonctionnalités de cette première version
+## Fonctionnalités de cette version
 
 - Découverte Bluetooth automatique des BMS `DWF*` sur le mini-PC Home Assistant.
 - Plusieurs BMS, lecture séquentielle pour limiter les conflits sur l'adaptateur.
@@ -40,6 +40,13 @@ Le Supervisor installe uniquement depuis la branche principale de ce dépôt. Le
 | `log_level` | `info` | `info`, `debug` ou `warning` |
 
 Les adresses personnelles de l'installation ne sont pas présentes dans le code.
+
+## Diagnostic MQTT et températures
+
+- Si MQTT affiche **Non connecté**, le panneau indique l’hôte et le port du service Supervisor, l’état de connexion et le compteur d’échecs (jamais le mot de passe).
+- Vérifier les journaux du module **Smart Docan BMS**, ainsi que ceux de **Mosquitto broker**. Les erreurs TCP/TLS ne sont plus silencieuses.
+- Si une batterie affiche **Températures : Non disponible**, la ligne de diagnostic indique le nombre de sondes annoncé dans la trame, le type de données et le nombre de mesures effectivement décodées.
+- L’onglet **Autres informations disponibles** présente les capacités, numéros de cellules extrêmes, MOSFET, équilibrage et codes remontés. Aucun paramètre BMS n’est écrit.
 
 ## Coexistence avec BLE Battery Management (HACS)
 
