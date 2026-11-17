@@ -79,6 +79,10 @@ def render(snapshot: dict) -> str:
             f"<div><dt>{title}</dt><dd>{fmt(d[key], unit)}</dd></div>"
             for key, title, unit in detail_fields if key in d
         )
+        if slot:
+            details += (f"<div><dt>Emplacement fixe</dt><dd>{int(slot)}</dd></div>"
+                        f"<div><dt>Adresse Bluetooth associée</dt>"
+                        f"<dd>{escape(str(item.get('address') or '—'))}</dd></div>")
         temp_debug = escape(item.get("temperature_diagnostic") or "Données non renseignées")
         cards.append(
             f'<section class="card"><h2>{name} <span class="{hue} tag">• {state}</span></h2>'
