@@ -45,7 +45,8 @@ jobs:
           assert config["options"]["mqtt_mode"] == "auto"
           assert config["schema"]["mqtt_password"] == "password"
           assert config["schema"]["poll_seconds"] == "int(5,300)"
-          assert config["options"]["dashboard_refresh_seconds"] >= 5
-          assert config["ingress_port"] == 1895
+          assert "dashboard_refresh_seconds" not in config["schema"]
+          assert "ingress" not in config
+          assert "ingress_port" not in config
           assert set(config["arch"]) == {"amd64", "aarch64"}
           PY
