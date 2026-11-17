@@ -1,0 +1,33 @@
+name: Smart Docan BMS
+slug: smart_docan_bms
+version: "0.1.0-dev"
+description: Lecture Bluetooth des BMS Daren / Docan Power NOON (MQTT et tableau de bord)
+url: https://github.com/tapion69/smart-docan-bms
+arch:
+  - amd64
+  - aarch64
+startup: application
+boot: auto
+init: false
+host_dbus: true
+services:
+  - mqtt:need
+ingress: true
+ingress_port: 1895
+panel_icon: mdi:battery-bluetooth
+options:
+  auto_discover: true
+  addresses: ""
+  names: ""
+  scan_seconds: 8
+  poll_seconds: 30
+  rescan_seconds: 180
+  log_level: info
+schema:
+  auto_discover: bool
+  addresses: str?
+  names: str?
+  scan_seconds: int(4,20)
+  poll_seconds: int(15,300)
+  rescan_seconds: int(60,3600)
+  log_level: list(info|debug|warning)

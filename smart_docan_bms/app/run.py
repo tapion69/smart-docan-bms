@@ -1,0 +1,350 @@
+"""Smart Docan BMS: BlueZ/Daren polling, MQTT Discovery and read-only dashboard."""
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import signal
+import threading
+import time
+from urllib.request import Request, urlopen
+
+from aiobmsble import BMSConfig
+from aiobmsble.bms.daren_bms import BMS
+from bleak import BleakScanner
+import paho.mqtt.client as mqtt
+
+from dashboard import start_dashboard
+from logic import aggregate, device_id, field_spec, normalise_sample
+
+LOG = logging.getLogger("smart_docan")
+OPTIONS = Path("/data/options.json")
+MAC_RE = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
+PREFIX = "smart_docan_bms"
+
+def parse_addresses(text: str) -> set[str]:
+    return {part.strip().upper() for part in re.split(r"[,;\s]+", text) if MAC_RE.fullmatch(part.strip())}
+
+def parse_names(text: str) -> dict[str, str]:
+    names = {}
+    for item in text.split(";"):
+        if "=" not in item:
+            continue
+        address, name = item.split("=", 1)
+        if MAC_RE.fullmatch(address.strip()) and name.strip():
+            names[address.strip().upper()] = name.strip()[:64]
+    return names
+
+def load_options() -> dict:
+    defaults = {
+        "auto_discover": True, "addresses": "", "names": "", "scan_seconds": 8,
+        "poll_seconds": 30, "rescan_seconds": 180, "log_level": "info"
+    }
+    if OPTIONS.exists():
+        defaults.update(json.loads(OPTIONS.read_text(encoding="utf-8")))
+    return defaults
+
+def mqtt_credentials() -> dict:
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        raise RuntimeError("Jeton Supervisor absent : fonctionnement hors Home Assistant non configuré")
+    req = Request(
+        "http://supervisor/services/mqtt",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+    )
+    with urlopen(req, timeout=12) as response:
+        payload = json.load(response)
+    if payload.get("result") != "ok":
+        raise RuntimeError("Impossible de récupérer le service MQTT auprès du Supervisor")
+    data = payload.get("data", {})
+    if not data.get("host"):
+        raise RuntimeError("Service MQTT indisponible (installer/configurer Mosquitto)")
+    return data
+
+class Store:
+    """Thread-safe status shared by MQTT worker, Bluetooth loop, and dashboard."""
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.batteries: dict[str, dict] = {}
+        self.aggregate: dict = {}
+        self.mqtt_connected = False
+
+    def scan(self, address: str, name: str, rssi: int | None):
+        with self.lock:
+            rec = self.batteries.setdefault(
+                address, {"address": address, "name": name, "online": False,
+                          "failures": 0, "last_seen": None, "error": None, "data": {},
+                          "info": {}}
+            )
+            rec["name"] = name
+            if rssi is not None:
+                rec["rssi"] = rssi
+
+    def success(self, address: str, data: dict, info: dict):
+        with self.lock:
+            rec = self.batteries[address]
+            rec.update(data=data, online=True, failures=0, error=None,
+                       last_seen=data["last_seen"])
+            if info:
+                rec["info"] = info
+            self._refresh()
+
+    def failure(self, address: str, exc: Exception):
+        with self.lock:
+            rec = self.batteries[address]
+            rec["failures"] += 1
+            rec["error"] = type(exc).__name__ + ": " + str(exc)[:180]
+            # transient BLE errors should not instantly mark everything unavailable
+            if rec["failures"] >= 3:
+                rec["online"] = False
+            self._refresh()
+
+    def _refresh(self):
+        self.aggregate = aggregate(list(self.batteries.values()), len(self.batteries))
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            # read-only JSON clone eliminates mutation while HTTP formats the page
+            return json.loads(json.dumps({
+                "batteries": sorted(self.batteries.values(), key=lambda x: x["address"]),
+                "aggregate": self.aggregate,
+                "mqtt_connected": self.mqtt_connected,
+            }))
+
+class MQTTBridge:
+    def __init__(self, settings: dict, store: Store):
+        self.store = store
+        self.announced: set[str] = set()
+        self.client = mqtt.Client(
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            client_id="smart-docan-bms",
+            protocol=mqtt.MQTTv311,
+        )
+        self.client.username_pw_set(settings.get("username", ""), settings.get("password", ""))
+        if settings.get("ssl"):
+            self.client.tls_set()
+        self.client.will_set(f"{PREFIX}/bridge/status", "offline", qos=1, retain=True)
+        self.client.reconnect_delay_set(min_delay=2, max_delay=60)
+        self.client.on_connect = self._connected
+        self.client.on_disconnect = self._disconnected
+        self.client.connect_async(settings["host"], int(settings.get("port", 1883)), keepalive=60)
+        self.client.loop_start()
+
+    def _connected(self, client, userdata, flags, reason_code, properties):
+        self.store.mqtt_connected = int(reason_code) == 0
+        self.announced.clear()
+        if self.store.mqtt_connected:
+            LOG.info("MQTT connecté")
+            self.publish(f"{PREFIX}/bridge/status", "online")
+        else:
+            LOG.warning("Connexion MQTT refusée (code %s)", reason_code)
+
+    def _disconnected(self, client, userdata, disconnect_flags, reason_code, properties):
+        self.store.mqtt_connected = False
+        self.announced.clear()
+        LOG.warning("MQTT déconnecté (code %s)", reason_code)
+
+    def publish(self, topic: str, payload: str | dict, retain: bool = True):
+        if not self.store.mqtt_connected:
+            return
+        msg = json.dumps(payload, ensure_ascii=False, allow_nan=False) if isinstance(payload, dict) else payload
+        self.client.publish(topic, msg, qos=1, retain=retain)
+
+    def entity(self, address: str, name: str, key: str, data: dict, info: dict):
+        spec = field_spec(key)
+        if not spec:
+            return
+        label, unit, device_class, state_class, category, kind = spec
+        ident = device_id(address)
+        uid = f"{ident}_{key}"
+        if uid in self.announced:
+            return
+        base = f"{PREFIX}/{ident}"
+        dev = {
+            "identifiers": [ident],
+            "name": name,
+            "manufacturer": info.get("manufacturer", "Daren"),
+            "model": info.get("model", "Docan Power NOON (Daren BLE)"),
+        }
+        if info.get("fw_version"):
+            dev["sw_version"] = str(info["fw_version"])
+        config = {
+            "name": label,
+            "unique_id": f"smart_{uid}",
+            "device": dev,
+            "state_topic": f"{base}/state",
+            "availability_topic": f"{base}/availability",
+            "payload_available": "online",
+            "payload_not_available": "offline",
+        }
+        if kind == "binary_sensor":
+            config["value_template"] = (
+                "{{ 'ON' if value_json.get('" + key + "') else 'OFF' }}"
+            )
+            config["payload_on"] = "ON"
+            config["payload_off"] = "OFF"
+        else:
+            config["value_template"] = "{{ value_json.get('" + key + "') }}"
+            if unit:
+                config["unit_of_measurement"] = unit
+            if state_class:
+                config["state_class"] = state_class
+        if device_class:
+            config["device_class"] = device_class
+        if category:
+            config["entity_category"] = category
+        self.publish(f"homeassistant/{kind}/{uid}/config", config)
+        if self.store.mqtt_connected:
+            self.announced.add(uid)
+
+    def battery(self, rec: dict):
+        address, name, data = rec["address"], rec["name"], rec["data"]
+        base = f"{PREFIX}/{device_id(address)}"
+        for key in data:
+            self.entity(address, name, key, data, rec.get("info") or {})
+        self.publish(f"{base}/state", data)
+        self.publish(f"{base}/availability", "online" if rec["online"] else "offline")
+
+    def summary(self, summary: dict):
+        uid = "docan_aggregate"
+        base = f"{PREFIX}/{uid}"
+        if summary.get("complete"):
+            for key, label, unit, device_class in (
+                ("battery_level", "SOC global estimé", "%", "battery"),
+                ("voltage", "Tension moyenne", "V", "voltage"),
+                ("current", "Courant total", "A", "current"),
+                ("power", "Puissance totale", "W", "power"),
+                ("stored_energy_wh", "Énergie stockée estimée", "Wh", "energy"),
+                ("voltage_spread", "Écart tensions batteries", "V", "voltage"),
+                ("online_count", "Batteries en ligne", None, None),
+            ):
+                if key not in summary:
+                    continue
+                entity_id = f"{uid}_{key}"
+                if entity_id not in self.announced:
+                    cfg = {
+                        "name": label, "unique_id": f"smart_{entity_id}",
+                        "device": {"identifiers": [uid], "name": "Docan Power - Global",
+                                   "manufacturer": "Smart Docan BMS",
+                                   "model": "Synthèse des batteries en parallèle"},
+                        "state_topic": f"{base}/state",
+                        "value_template": "{{ value_json.get('" + key + "') }}",
+                        "availability_topic": f"{base}/availability",
+                        "payload_available": "online", "payload_not_available": "offline",
+                    }
+                    if unit:
+                        cfg["unit_of_measurement"] = unit
+                        cfg["state_class"] = "measurement"
+                    if device_class:
+                        cfg["device_class"] = device_class
+                    self.publish(f"homeassistant/sensor/{entity_id}/config", cfg)
+                    if self.store.mqtt_connected:
+                        self.announced.add(entity_id)
+            self.publish(f"{base}/state", summary)
+        self.publish(f"{base}/availability", "online" if summary.get("complete") else "offline")
+
+    def stop(self):
+        self.client.publish(f"{PREFIX}/bridge/status", "offline", qos=1, retain=True)
+        self.client.disconnect()
+        self.client.loop_stop()
+
+async def run() -> None:
+    settings = load_options()
+    logging.basicConfig(
+        level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    LOG.info("Smart Docan BMS 0.1.0-dev — lecture seule, Bluetooth Daren")
+    wanted = parse_addresses(settings.get("addresses", ""))
+    labels = parse_names(settings.get("names", ""))
+    if not settings.get("auto_discover", True) and not wanted:
+        LOG.warning("Découverte automatique désactivée et aucune adresse configurée")
+    store = Store()
+    start_dashboard(store.snapshot)
+    try:
+        bridge = MQTTBridge(mqtt_credentials(), store)
+    except Exception:
+        LOG.exception("MQTT requis : vérifier le service Mosquitto")
+        raise
+    LOG.info("Dashboard Home Assistant disponible via Ingress (port interne 1895)")
+    devices: dict[str, tuple] = {}  # address -> (BLEDevice, RSSI)
+    known_info: dict[str, dict] = {}
+    next_scan = 0.0
+    scan_seconds = int(settings["scan_seconds"])
+    rescan = int(settings["rescan_seconds"])
+    polling = int(settings["poll_seconds"])
+
+    async def read_one(address: str, device, rssi):
+        name = labels.get(address, device.name or address)
+        store.scan(address, name, rssi)
+        bms = BMS(ble_device=device, config=BMSConfig(keep_alive=True))
+        try:
+            async with bms:
+                sample = await bms.async_update()
+                if not sample:
+                    raise ValueError("Trame BMS vide")
+                if address not in known_info:
+                    try:
+                        info = await bms.device_info()
+                        known_info[address] = dict(info)
+                    except Exception as exc:
+                        # Some firmware variants expose measurements but no device info.
+                        LOG.info("Informations firmware indisponibles pour %s : %s", name, type(exc).__name__)
+                        known_info[address] = {}
+            data = normalise_sample(sample, rssi)
+            store.success(address, data, known_info[address])
+            LOG.info("%s : SOC %s %% ; %s V ; %s cellules",
+                     name, data.get("battery_level", "?"), data.get("voltage", "?"),
+                     len([k for k in data if re.fullmatch(r"cell_\d+", k)]))
+        except Exception as exc:
+            store.failure(address, exc)
+            LOG.warning("%s : lecture impossible (%s)", name, type(exc).__name__)
+        finally:
+            rec = next((r for r in store.snapshot()["batteries"] if r["address"] == address), None)
+            if rec:
+                bridge.battery(rec)
+
+    try:
+        while True:
+            if time.monotonic() >= next_scan:
+                try:
+                    found = await BleakScanner.discover(timeout=scan_seconds, return_adv=True)
+                    count = 0
+                    for device, adv in found.values():
+                        name = (adv.local_name or device.name or "").strip()
+                        address = device.address.upper()
+                        if not MAC_RE.fullmatch(address):
+                            continue
+                        if (wanted and address not in wanted) or (
+                            not wanted and (not settings["auto_discover"] or not name.startswith("DWF"))
+                        ):
+                            continue
+                        # With an explicit address allow different advertisement names.
+                        if not wanted and not name.startswith("DWF"):
+                            continue
+                        devices[address] = (device, adv.rssi)
+                        store.scan(address, labels.get(address, name), adv.rssi)
+                        count += 1
+                    LOG.info("Bluetooth : %d BMS détecté(s) pendant cette recherche, %d connus", count, len(devices))
+                except Exception as exc:
+                    LOG.warning("Recherche Bluetooth indisponible (%s) : vérifier host_dbus", type(exc).__name__)
+                next_scan = time.monotonic() + rescan
+            for address, (device, rssi) in sorted(devices.items()):
+                await read_one(address, device, rssi)
+            bridge.summary(store.snapshot()["aggregate"])
+            await asyncio.sleep(polling)
+    finally:
+        bridge.stop()
+
+def main():
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        LOG.info("Arrêt de l'add-on")
+
+if __name__ == "__main__":
+    main()
