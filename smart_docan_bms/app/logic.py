@@ -51,7 +51,15 @@ def normalise_sample(sample: dict, rssi: int | None = None) -> dict:
     """Keep supported raw fields and expose every returned cell/temperature."""
     data: dict = {}
     for key, value in sample.items():
-        if key in ("cell_voltages", "temperature", "problems", "packs"):
+        if key in ("cell_voltages", "temperature", "temp_values", "problems", "packs"):
+            continue
+        # aiobmsble 0.33.0: temp_sensors/temp_values/delta_voltage.
+        # Later versions: temp_count/temperature/delta_cell_voltage.
+        if key == "temp_sensors":
+            data["temp_count"] = value
+            continue
+        if key == "delta_voltage":
+            data["delta_cell_voltage"] = value
             continue
         if isinstance(value, (str, bool, int, float)) or value is None:
             data[key] = value
@@ -68,13 +76,20 @@ def normalise_sample(sample: dict, rssi: int | None = None) -> dict:
         data["cell_max_index"] = cells.index(max(cells)) + 1
         data.setdefault("delta_cell_voltage", round(max(cells) - min(cells), 4))
 
-    temps = sample.get("temperature", []) or []
-    if isinstance(temps, list) and temps:
+    # aiobmsble 0.33.0 also publishes a numeric average in "temperature".
+    avg_temp = sample.get("temperature")
+    if isinstance(avg_temp, (float, int)) and not isinstance(avg_temp, bool):
+        data["temperature"] = float(avg_temp)
+    temps = sample.get("temp_values", sample.get("temperature", [])) or []
+    if isinstance(temps, (list, tuple)) and temps:
         for pos, temp in enumerate(temps, 1):
             data[f"temp_{pos:02d}"] = float(getattr(temp, "value", temp))
             sensor_type = getattr(getattr(temp, "type", None), "name", "GENERIC")
             data[f"temp_type_{pos:02d}"] = str(sensor_type)
-        data["temperature"] = round(sum(data[f"temp_{i:02d}"] for i in range(1, len(temps) + 1)) / len(temps), 2)
+        # Preserve the library's average when supplied; calculate only if absent.
+        data.setdefault("temperature", round(
+            sum(data[f"temp_{i:02d}"] for i in range(1, len(temps) + 1)) / len(temps), 2
+        ))
 
     if "problems" in sample:
         data["problems"] = [str(p) for p in sample["problems"]]
