@@ -24,6 +24,7 @@ from discovery import (
 )
 from settings import mqtt_settings, remaining_poll_delay
 from slots import SlotAssignments, MAX_SLOTS, slot_device_id
+from recovery import is_attempt_due, missing_slots, scan_interval
 
 LOG = logging.getLogger("smart_docan")
 OPTIONS = Path("/data/options.json")
@@ -46,7 +47,8 @@ def parse_names(text: str) -> dict[str, str]:
 def load_options() -> dict:
     defaults = {
         "auto_discover": True, "addresses": "", "names": "", "scan_seconds": 8,
-        "poll_seconds": 30, "rescan_seconds": 180, "log_level": "info",
+        "poll_seconds": 30, "rescan_seconds": 180,
+        "missing_rescan_seconds": 30, "log_level": "info",
         "strict_slots": False, "migrate_legacy_entities": True,
     }
     if OPTIONS.exists():
@@ -287,7 +289,7 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.5-dev — Bluetooth vers MQTT, sans interface web")
+    LOG.info("Smart Docan BMS 0.1.6-dev — auto-récupération BLE, sans interface web")
     wanted = parse_addresses(settings.get("addresses", ""))
     slots = SlotAssignments(Path("/data/slots.json"), settings)
     if not settings.get("auto_discover", True) and not wanted and not slots.configured():
@@ -306,6 +308,12 @@ async def run() -> None:
     next_scan = 0.0
     scan_seconds = int(settings["scan_seconds"])
     rescan = int(settings["rescan_seconds"])
+    missing_rescan = int(settings.get("missing_rescan_seconds", 30))
+    last_attempts: dict[str, float] = {}
+    previous_missing_slots: set[int] = set()
+    LOG.info("Recherche BLE normale %d s, recherche si batterie absente %d s",
+             rescan, missing_rescan)
+
     async def read_one(address: str, device, rssi):
         slot = slots.slot_for(address)
         if slot is None:
@@ -314,18 +322,20 @@ async def run() -> None:
         store.scan(address, name, rssi, slot)
         bms = BMS(ble_device=device, config=BMSConfig(keep_alive=True))
         try:
-            async with bms:
-                sample = await bms.async_update()
-                if not sample:
-                    raise ValueError("Trame BMS vide")
-                if address not in known_info:
-                    try:
-                        info = await bms.device_info()
-                        known_info[address] = dict(info)
-                    except Exception as exc:
-                        # Some firmware variants expose measurements but no device info.
-                        LOG.info("Informations firmware indisponibles pour %s : %s", name, type(exc).__name__)
-                        known_info[address] = {}
+            # A stalled BMS must not block all other packs indefinitely.
+            async with asyncio.timeout(30):
+                async with bms:
+                    sample = await bms.async_update()
+                    if not sample:
+                        raise ValueError("Trame BMS vide")
+                    if address not in known_info:
+                        try:
+                            info = await bms.device_info()
+                            known_info[address] = dict(info)
+                        except Exception as exc:
+                            # Firmware info may be unavailable although readings work.
+                            LOG.info("Informations firmware indisponibles pour %s : %s", name, type(exc).__name__)
+                            known_info[address] = {}
             data = normalise_sample(sample, rssi)
             temperature_format = "temp_values" if "temp_values" in sample else "temperature"
             raw_temps = sample.get(temperature_format)
@@ -336,15 +346,21 @@ async def run() -> None:
                 f"sondes décodées: {count}; moyenne: {scalar if scalar is not None else '?'}; "
                 f"source: {temperature_format}"
             )
+            previously_seen = bool(store.batteries[address].get("last_seen"))
+            was_offline = not store.batteries[address].get("online")
             store.success(address, data, known_info[address], temp_diagnostic)
+            if was_offline and previously_seen:
+                LOG.info("%s : communication Bluetooth rétablie automatiquement", name)
             if count == 0:
                 LOG.info("%s : températures absentes du décodage (%s)", name, temp_diagnostic)
             LOG.info("%s : SOC %s %% ; %s V ; %s cellules",
                      name, data.get("battery_level", "?"), data.get("voltage", "?"),
                      len([k for k in data if re.fullmatch(r"cell_\d+", k)]))
+            return True
         except Exception as exc:
             store.failure(address, exc)
             LOG.warning("%s : lecture impossible (%s)", name, type(exc).__name__)
+            return False
         finally:
             rec = next((r for r in store.snapshot()["batteries"] if r["address"] == address), None)
             if rec and bridge is not None:
@@ -382,8 +398,6 @@ async def run() -> None:
                         address = device.address.upper()
                         if not MAC_RE.fullmatch(address):
                             continue
-                        # Previously bound batteries always remain eligible, including
-                        # when a BMS advertises with an empty/changed name.
                         if address in reserved_addresses:
                             pass
                         elif wanted:
@@ -392,21 +406,64 @@ async def run() -> None:
                         elif not settings.get("auto_discover", True) or not name.startswith("DWF"):
                             continue
                         eligible[address] = (device, adv.rssi)
+
                     assigned = slots.bind_discovered(set(eligible))
                     for address, slot in assigned.items():
                         device, rssi = eligible[address]
                         store.scan(address, slots.get_name(slot), rssi, slot)
+                        # Replace old BlueZ object with a fresh discovered device.
                         devices[address] = (device, rssi)
-                    # Any configured, but unseen, slot stays offline and retains its ID.
-                    count = len(assigned)
-                    LOG.info("Bluetooth : %d BMS détecté(s) pendant cette recherche, %d connus", count, len(devices))
+
+                    missing = set(missing_slots(slots.configured(), set(assigned)))
+                    newly_missing = missing - previous_missing_slots
+                    recovered = previous_missing_slots - missing
+                    for slot in sorted(newly_missing):
+                        LOG.warning(
+                            "Batterie %d absente du scan BLE : son emplacement reste réservé ; "
+                            "nouvelle recherche dans %d s", slot, missing_rescan
+                        )
+                    for slot in sorted(recovered):
+                        LOG.info("Batterie %d de nouveau visible lors du scan Bluetooth", slot)
+                    previous_missing_slots = missing
+                    interval = scan_interval(rescan, missing_rescan, bool(missing))
+                    next_scan = time.monotonic() + interval
+                    LOG.info(
+                        "Bluetooth : %d/%d batteries associées vues ; prochaine recherche dans %d s",
+                        len(assigned), len(slots.configured()), interval
+                    )
                 except Exception as exc:
-                    LOG.warning("Recherche Bluetooth indisponible (%s) : vérifier host_dbus", type(exc).__name__)
-                next_scan = time.monotonic() + rescan
+                    LOG.warning(
+                        "Recherche Bluetooth indisponible (%s) : nouvel essai dans %d s",
+                        type(exc).__name__, missing_rescan
+                    )
+                    next_scan = time.monotonic() + missing_rescan
+
+            # Read every known BMS sequentially; pause only the failing BMS.
+            # A missing BMS must not block healthy batteries 2-4.
             for address, (device, rssi) in sorted(
-                devices.items(), key=lambda p: slots.slot_for(p[0]) or 99
+                list(devices.items()), key=lambda p: slots.slot_for(p[0]) or 99
             ):
-                await read_one(address, device, rssi)
+                rec = store.batteries.get(address, {})
+                failures = rec.get("failures", 0)
+                if not is_attempt_due(failures, last_attempts.get(address),
+                                      time.monotonic()):
+                    continue
+                ok = await read_one(address, device, rssi)
+                if ok:
+                    last_attempts.pop(address, None)
+                else:
+                    last_attempts[address] = time.monotonic()
+                    failures = store.batteries[address]["failures"]
+                    if failures >= 3:
+                        # The BLEDevice's BlueZ path might be stale. Force a fresh
+                        # advertisement before connecting again; do not reset hci0.
+                        devices.pop(address, None)
+                        next_scan = min(next_scan, time.monotonic() + 3)
+                        LOG.warning(
+                            "Batterie %d : %d erreurs Bluetooth ; abandon de la référence "
+                            "périmée et recherche accélérée (sans redémarrer le Bluetooth)",
+                            slots.slot_for(address), failures
+                        )
             if bridge is not None:
                 snapshot = store.snapshot()
                 # Publish offline availability even for currently missing assigned slots.
