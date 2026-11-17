@@ -36,22 +36,45 @@ try:
     arrived = threading.Event()
 
     def on_message(client, userdata, message):
-        received.append((message.topic, json.loads(message.payload)))
+        if not message.payload:
+            received.append((message.topic, None))  # retained legacy config deletion
+        else:
+            received.append((message.topic, json.loads(message.payload)))
         arrived.set()
 
     subscriber = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
     subscriber.username_pw_set("docan_ci", "ci-testing-password")
     subscriber.on_message = on_message
     subscriber.connect("127.0.0.1", 18884, keepalive=30)
-    subscriber.subscribe("homeassistant/sensor/#")
+    subscriber.subscribe("homeassistant/#")
     subscriber.loop_start()
     try:
-        bridge.entity("AA:BB:CC:DD:EE:FF", "Battery CI", "voltage",
-                      {"voltage": 53.2}, {})
+        bridge.battery({
+            "slot": 1, "address": "AA:BB:CC:DD:EE:FF", "name": "Batterie 1",
+            "data": {"voltage": 53.2, "battery_level": 42},
+            "info": {}, "online": True,
+        })
+        bridge.summary({"complete": True, "voltage": 53.2, "battery_level": 42,
+                        "current": 0, "power": 0, "online_count": 1})
         assert arrived.wait(10), "MQTT Discovery config was not received"
-        assert any(item.get("unique_id") == "smart_docan_aabbccddeeff_voltage"
-                   for _, item in received), f"Unexpected MQTT data: {received}"
-        print("Manual MQTT username/password handshake + Discovery: PASS")
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            if all(any(topic == expected for topic, _ in received) for expected in (
+                "homeassistant/sensor/smart_docan_bms_battery_1_voltage/config",
+                "homeassistant/sensor/smart_docan_bms_global_soc/config",
+                "homeassistant/sensor/docan_aabbccddeeff_voltage/config",
+            )):
+                break
+            time.sleep(0.1)
+        configs = [item for _, item in received if isinstance(item, dict)]
+        assert any(item.get("unique_id") == "smart_docan_bms_battery_1_voltage"
+                   and item.get("default_entity_id") == "sensor.smart_docan_bms_battery_1_voltage"
+                   for item in configs), "Fixed per-slot MQTT Discovery not received"
+        assert any(item.get("unique_id") == "smart_docan_bms_global_soc"
+                   for item in configs), "Fixed global MQTT Discovery not received"
+        assert any(topic == "homeassistant/sensor/docan_aabbccddeeff_voltage/config"
+                   and data is None for topic, data in received), "Retained legacy cleanup not published"
+        print("Manual MQTT auth + fixed slot/global Discovery + MAC migration: PASS")
     finally:
         subscriber.disconnect()
         subscriber.loop_stop()
