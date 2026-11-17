@@ -38,6 +38,9 @@ configuration:
     description: Chaque cycle lit toutes les batteries et publie les valeurs; si les 4 BMS prennent plus longtemps, la cadence sera limitée par le Bluetooth
   rescan_seconds:
     name: Fréquence de recherche des appareils (secondes)
+  missing_rescan_seconds:
+    name: Nouvelle recherche si batterie manquante (secondes)
+    description: Recherche plus fréquente uniquement lorsqu'une batterie affectée à un emplacement n'est pas vue au scan (30 s conseillé)
   mqtt_mode:
     name: Mode MQTT
     description: auto = identifiants du Supervisor; manual = paramètres saisis ci-dessous
