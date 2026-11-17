@@ -1,0 +1,32 @@
+configuration:
+  auto_discover:
+    name: Auto-discover Bluetooth BMS
+  addresses:
+    name: Bluetooth addresses (optional)
+  names:
+    name: Custom BMS names (optional)
+  scan_seconds:
+    name: Bluetooth scanning duration (seconds)
+  poll_seconds:
+    name: Target time between BMS polling cycle starts (seconds)
+    description: Each cycle reads all batteries and publishes measurements; BLE duration can limit throughput
+  rescan_seconds:
+    name: Device rescan interval (seconds)
+  dashboard_refresh_seconds:
+    name: Dashboard refresh interval (seconds)
+    description: Web page refresh only, independent of BMS polling
+  mqtt_mode:
+    name: MQTT connection mode
+    description: auto = Supervisor credentials; manual = credentials entered below
+  mqtt_host:
+    name: MQTT broker host (manual mode)
+  mqtt_port:
+    name: MQTT broker port (manual mode)
+  mqtt_username:
+    name: MQTT username (manual mode)
+  mqtt_password:
+    name: MQTT password (manual mode)
+  mqtt_tls:
+    name: Enable MQTT TLS (manual mode)
+  log_level:
+    name: Logging level
