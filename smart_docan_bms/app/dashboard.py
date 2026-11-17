@@ -34,6 +34,7 @@ def render(snapshot: dict) -> str:
     poll = int(snapshot.get("poll_seconds", 30))
     refresh_seconds = int(snapshot.get("dashboard_refresh_seconds", 20))
     cycle_duration = snapshot.get("cycle_duration_seconds")
+    cycle_period = snapshot.get("last_cycle_period_seconds")
     cards = []
     for item in records:
         d = item.get("data") or {}
@@ -99,7 +100,8 @@ def render(snapshot: dict) -> str:
         f'Actualisation de cette page : {refresh_seconds} s</p>'
         f'<p class="muted tag">Durée du dernier cycle complet : '
         f'{fmt(cycle_duration, " s")} (recherche Bluetooth comprise). '
-        'Si cette durée dépasse la cible, la lecture des 4 BMS limite la cadence.</p>'
+        f'Intervalle réel entre les deux derniers cycles : {fmt(cycle_period, " s")}. '
+        'Si la durée d’un cycle dépasse la cible, le Bluetooth limite la cadence.</p>'
     )
     if not snapshot.get("mqtt_connected"):
         head += (
