@@ -176,7 +176,9 @@ class MQTTBridge:
         self.client.loop_start()
 
     def _connected(self, client, userdata, flags, reason_code, properties):
-        self.store.mqtt_connected = int(reason_code) == 0
+        # Paho MQTT v2 passes a ReasonCode object, not an int.
+        # int(ReasonCode) raises TypeError and previously killed the MQTT worker.
+        self.store.mqtt_connected = getattr(reason_code, "value", reason_code) == 0
         self.announced.clear()
         if self.store.mqtt_connected:
             self.store.mqtt_error = ""
