@@ -323,9 +323,15 @@ async def run() -> None:
                         LOG.info("Informations firmware indisponibles pour %s : %s", name, type(exc).__name__)
                         known_info[address] = {}
             data = normalise_sample(sample, rssi)
-            raw_temps = sample.get("temperature")
-            count = len(raw_temps) if isinstance(raw_temps, (list, tuple)) else (1 if raw_temps is not None else 0)
-            temp_diagnostic = f"Sondes annoncées: {sample.get('temp_count', '?')}; données reçues: {count}; format: {type(raw_temps).__name__}"
+            temperature_format = "temp_values" if "temp_values" in sample else "temperature"
+            raw_temps = sample.get(temperature_format)
+            count = len(raw_temps) if isinstance(raw_temps, (list, tuple)) else 0
+            scalar = sample.get("temperature") if isinstance(sample.get("temperature"), (int, float)) else None
+            temp_diagnostic = (
+                f"Sondes annoncées: {data.get('temp_count', '?')}; "
+                f"sondes décodées: {count}; moyenne: {scalar if scalar is not None else '?'}; "
+                f"source: {temperature_format}"
+            )
             store.success(address, data, known_info[address], temp_diagnostic)
             if count == 0:
                 LOG.info("%s : températures absentes du décodage (%s)", name, temp_diagnostic)
