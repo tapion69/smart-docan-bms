@@ -1,0 +1,110 @@
+"""Read-only Home Assistant ingress dashboard (local HTTP on port 1895)."""
+from __future__ import annotations
+
+from html import escape
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import threading
+
+_CSS = """
+*{box-sizing:border-box}body{margin:0;background:#101923;color:#f1f5fa;font:15px system-ui,Arial;padding:22px}
+h1{margin:0 0 4px;font-size:24px}.muted{color:#96a6b8}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin-top:16px}
+.card{background:#192733;border:1px solid #304150;border-radius:14px;padding:18px;min-width:0}
+.good{color:#5dd3ac}.bad{color:#ff8d92}.chips{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.chip{background:#253545;border-radius:8px;padding:12px;min-width:0}
+.chip b{display:block;font-size:20px;overflow-wrap:anywhere}
+small{color:#97abbd}h2{font-size:17px;margin:2px 0 14px}h3{font-size:14px;color:#bdccdb;margin:18px 0 8px}
+.cells{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.cell{background:#253747;border-radius:6px;padding:8px;text-align:center}
+.cell span{display:block;color:#a8b6c4;font-size:11px}.cell b{font-size:13px}
+.tag{font-size:12px}.warn{background:#4c302e}.footer{font-size:12px;margin-top:18px}
+@media(max-width:450px){body{padding:12px}.chips{grid-template-columns:repeat(2,1fr)}.cells{grid-template-columns:repeat(4,1fr)}}
+"""
+
+def render(snapshot: dict) -> str:
+    """Render a complete page; escape all untrusted names and values."""
+    records = snapshot.get("batteries", [])
+    summary = snapshot.get("aggregate", {})
+    def fmt(value, suffix=""):
+        return ("—" if value is None else escape(str(value)) + suffix)
+    status = "Connecté" if snapshot.get("mqtt_connected") else "Non connecté"
+    cards = []
+    for item in records:
+        d = item.get("data") or {}
+        name = escape(item.get("name") or item.get("address") or "BMS")
+        state = "En ligne" if item.get("online") else "Hors ligne"
+        hue = "good" if item.get("online") else "bad"
+        chips = "".join(
+            f'<div class="chip"><small>{label}</small><b>{fmt(d.get(key), suffix)}</b></div>'
+            for key, label, suffix in (
+                ("battery_level", "SOC", " %"), ("voltage", "Tension", " V"),
+                ("current", "Courant", " A"), ("power", "Puissance", " W"),
+                ("delta_cell_voltage", "Delta cellules", " V"),
+                ("battery_health", "SOH", " %"),
+            )
+        )
+        cell_items = [(k, v) for k, v in sorted(d.items()) if k.startswith("cell_") and k[5:].isdigit()]
+        cells = "".join(
+            f'<div class="cell"><span>Cellule {int(key[5:])}</span><b>{fmt(value, " V")}</b></div>'
+            for key, value in cell_items
+        )
+        temp_items = [(k, v) for k, v in sorted(d.items()) if k.startswith("temp_") and k[5:].isdigit()]
+        temps = ", ".join(f'Sonde {int(key[5:])}: {fmt(value, " °C")}' for key, value in temp_items) or "Non disponible"
+        alerts = escape(", ".join(d.get("problems", [])) or ("Alarme signalée" if d.get("problem") else "Aucune alarme signalée"))
+        error = escape(item.get("error") or "")
+        cards.append(
+            f'<section class="card"><h2>{name} <span class="{hue} tag">• {state}</span></h2>'
+            f'<div class="chips">{chips}</div><h3>Cellules ({len(cell_items)})</h3>'
+            f'<div class="cells">{cells or "<small>En attente des données</small>"}</div>'
+            f'<h3>Températures</h3><p>{temps}</p><h3>Diagnostic</h3><p>{alerts}</p>'
+            f'<p class="muted tag">Signal : {fmt(d.get("rssi"), " dBm")} | '
+            f'Cycles : {fmt(d.get("cycles"))} | Dernière lecture : {fmt(item.get("last_seen"))}'
+            f'<br>{error}</p></section>'
+        )
+    if not cards:
+        cards.append('<section class="card">Recherche des BMS DWF… Vérifiez le Bluetooth et les journaux de l’add-on.</section>')
+    count = summary.get("online_count", 0)
+    expected = summary.get("expected_count", 0)
+    head = (
+        f'<p class="muted">{count}/{expected} batteries en ligne · MQTT : {escape(status)} · '
+        'Lecture seule · Actualisation toutes les 20 secondes</p>'
+    )
+    if summary.get("complete"):
+        head += (
+            '<div class="grid"><section class="card"><h2>Parc batteries (câblage parallèle)</h2>'
+            f'<div class="chips"><div class="chip"><small>SOC global</small><b>{fmt(summary.get("battery_level"), " %")}</b></div>'
+            f'<div class="chip"><small>Courant total</small><b>{fmt(summary.get("current"), " A")}</b></div>'
+            f'<div class="chip"><small>Puissance totale</small><b>{fmt(summary.get("power"), " W")}</b></div></div>'
+            '</section></div>'
+        )
+    else:
+        head += '<p class="bad">Synthèse suspendue : données manquantes sur au moins une batterie.</p>'
+    return (
+        '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta http-equiv="refresh" content="20"><title>Smart Docan BMS</title>'
+        f'<style>{_CSS}</style></head><body><h1>Smart Docan BMS</h1>{head}'
+        f'<main class="grid">{"".join(cards)}</main>'
+        '<p class="muted footer">Données indicatives : ne pas utiliser pour une protection de batterie.</p></body></html>'
+    )
+
+def start_dashboard(snapshot_callable, port: int = 1895) -> ThreadingHTTPServer:
+    """Start ingress-compatible status page in a daemon thread."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.rstrip("/").endswith("/health"):
+                content = json.dumps({"status": "ok"}).encode()
+                mime = "application/json"
+            else:
+                content = render(snapshot_callable()).encode("utf-8")
+                mime = "text/html; charset=utf-8"
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        def log_message(self, fmt, *args):
+            return
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
