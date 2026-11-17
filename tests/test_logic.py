@@ -65,7 +65,7 @@ class LogicTests(unittest.TestCase):
         self.assertNotIn("current", result)
 
     def test_stable_device_identity(self):
-        self.assertEqual(device_id("68:09:47:41:81:BE"), "docan_6809474181be")
+        self.assertEqual(device_id("AA:BB:CC:DD:EE:FF"), "docan_aabbccddeeff")
         self.assertEqual(field_spec("cell_16")[0], "Tension cellule 16")
         self.assertIsNone(field_spec("temp_type_01"))
 
