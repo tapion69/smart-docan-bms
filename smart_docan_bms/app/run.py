@@ -1,4 +1,4 @@
-"""Smart Docan BMS: BlueZ/Daren polling, MQTT Discovery and read-only dashboard."""
+"""Smart Docan BMS: headless BlueZ/Daren polling and MQTT Discovery."""
 from __future__ import annotations
 
 import asyncio
@@ -8,7 +8,6 @@ import logging
 import os
 from pathlib import Path
 import re
-import signal
 import threading
 import time
 from urllib.request import Request, urlopen
@@ -18,7 +17,6 @@ from aiobmsble.bms.daren_bms import BMS
 from bleak import BleakScanner
 import paho.mqtt.client as mqtt
 
-from dashboard import start_dashboard
 from logic import aggregate, normalise_sample
 from discovery import (
     GLOBAL_FIELDS, battery_discovery, global_discovery,
@@ -73,11 +71,10 @@ def mqtt_credentials() -> dict:
     return data
 
 class Store:
-    """Thread-safe status shared by MQTT worker, Bluetooth loop, and dashboard."""
-    def __init__(self, poll_seconds: int = 30, dashboard_refresh_seconds: int = 20):
+    """Thread-safe status shared by MQTT worker and Bluetooth loop."""
+    def __init__(self, poll_seconds: int = 30):
         self.lock = threading.RLock()
         self.poll_seconds = poll_seconds
-        self.dashboard_refresh_seconds = dashboard_refresh_seconds
         self.cycle_duration_seconds = None
         self.cycle_completed_at = None
         self.last_cycle_period_seconds = None
@@ -157,7 +154,6 @@ class Store:
                 "mqtt_error": self.mqtt_error,
                 "mqtt_failures": self.mqtt_failures,
                 "poll_seconds": self.poll_seconds,
-                "dashboard_refresh_seconds": self.dashboard_refresh_seconds,
                 "cycle_duration_seconds": self.cycle_duration_seconds,
                 "last_cycle_period_seconds": self.last_cycle_period_seconds,
                 "cycle_completed_at": self.cycle_completed_at,
@@ -291,7 +287,7 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.3-dev — slots persistants, lecture seule, Bluetooth Daren")
+    LOG.info("Smart Docan BMS 0.1.5-dev — Bluetooth vers MQTT, sans interface web")
     wanted = parse_addresses(settings.get("addresses", ""))
     slots = SlotAssignments(Path("/data/slots.json"), settings)
     if not settings.get("auto_discover", True) and not wanted and not slots.configured():
@@ -299,16 +295,12 @@ async def run() -> None:
     for slot, address in slots.configured():
         LOG.info("Emplacement réservé : batterie %d", slot)
     polling = int(settings["poll_seconds"])
-    refresh = int(settings.get("dashboard_refresh_seconds", 20))
-    store = Store(poll_seconds=polling, dashboard_refresh_seconds=refresh)
+    store = Store(poll_seconds=polling)
     for slot, address in slots.configured():
         store.register_slot(slot, address, slots.get_name(slot))
-    start_dashboard(store.snapshot)
     bridge: MQTTBridge | None = None
     next_mqtt_attempt = 0.0
-    LOG.info("Cadence cible de lecture et publication BMS: %d s; rafraîchissement écran: %d s",
-             polling, refresh)
-    LOG.info("Dashboard Home Assistant disponible via Ingress (port interne 1895)")
+    LOG.info("Cadence cible de lecture et publication BMS: %d s", polling)
     devices: dict[str, tuple] = {}  # address -> (BLEDevice, RSSI)
     known_info: dict[str, dict] = {}
     next_scan = 0.0
@@ -371,7 +363,7 @@ async def run() -> None:
                         migrate_legacy=bool(settings.get("migrate_legacy_entities", True)),
                     )
                 except Exception as exc:
-                    # MQTT failure must never stop Bluetooth telemetry or web UI.
+                    # MQTT failure must never stop Bluetooth telemetry.
                     store.mqtt_connected = False
                     if isinstance(exc, ValueError):
                         store.mqtt_error = str(exc)
