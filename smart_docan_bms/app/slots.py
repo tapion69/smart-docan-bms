@@ -61,11 +61,19 @@ class SlotAssignments:
                     raise ValueError("Numéro d'emplacement invalide dans slots.json")
                 self.slots[int(index)] = clean_mac(mac)
 
-        # Settings win over persistence; duplicate addresses are forbidden.
+        # Explicit settings override stored auto assignments (including swaps).
+        overrides: dict[int, str] = {}
         for i in range(1, MAX_SLOTS + 1):
             configured = str(options.get(f"slot_{i}_address") or "").strip()
             if configured:
-                self.slots[i] = clean_mac(configured)
+                overrides[i] = clean_mac(configured)
+        if len(set(overrides.values())) != len(overrides):
+            raise ValueError("Une même adresse Bluetooth est attribuée à deux batteries")
+        if overrides:
+            for i, address in list(self.slots.items()):
+                if i not in overrides and address in overrides.values():
+                    del self.slots[i]
+            self.slots.update(overrides)
         if len(set(self.slots.values())) != len(self.slots):
             raise ValueError("Une même adresse Bluetooth est attribuée à deux batteries")
         self._save_if_changed()
