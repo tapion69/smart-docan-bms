@@ -28,7 +28,11 @@ jobs:
           with open("smart_docan_bms/config.yaml", encoding="utf-8") as stream:
               config = yaml.safe_load(stream)
           assert config["host_dbus"] is True
-          assert "mqtt:need" in config["services"]
+          assert "mqtt:want" in config["services"]
+          assert config["options"]["mqtt_mode"] == "auto"
+          assert config["schema"]["mqtt_password"] == "password"
+          assert config["options"]["poll_seconds"] >= 10
+          assert config["options"]["dashboard_refresh_seconds"] >= 5
           assert config["ingress_port"] == 1895
           assert set(config["arch"]) == {"amd64", "aarch64"}
           PY
