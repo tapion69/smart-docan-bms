@@ -59,7 +59,7 @@ def voltage_decimals(key: str) -> int | None:
     """Pack voltage is 2 decimals; every other published voltage is 3."""
     if key == "voltage":
         return 2
-    if key in VOLTAGE_THREE_DECIMALS or re.fullmatch(r"cell_\\d{2}", key):
+    if key in VOLTAGE_THREE_DECIMALS or re.fullmatch(r"cell_\d{2}", key):
         return 3
     return None
 
