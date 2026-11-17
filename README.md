@@ -2,8 +2,8 @@
 
 Add-on **Home Assistant OS / Supervised** pour les batteries **Docan Power NOON équipées d'un BMS Daren** diffusant un nom Bluetooth commençant par `DWF`.
 
-> **Statut : 0.1.1-dev — première version à tester sur matériel réel.**
-> La connexion à quatre batteries n'a pas encore été validée sur l'installation cible.
+> **Statut : 0.1.2-dev — développement, validé sur une première installation à 4 batteries.**
+> La lecture des 64 cellules a été confirmée sur cette installation. La connexion MQTT reste à valider sur le matériel cible après configuration manuelle.
 > Ce projet n'effectue aucune commande de configuration des BMS : uniquement des requêtes de télémétrie. Il ne remplace **jamais** les protections du BMS.
 
 ## Fonctionnalités de cette version
@@ -16,6 +16,8 @@ Add-on **Home Assistant OS / Supervised** pour les batteries **Docan Power NOON 
 - Tableau de bord en français dans Home Assistant (**Ingress**, port interne 1895).
 - Synthèse multi-batteries en **parallèle** : SOC pondéré par capacité lorsque connue, somme courants et puissances, tension moyenne, suspendue si une batterie connue est hors ligne.
 - Échecs Bluetooth : 3 erreurs consécutives avant passage hors ligne; reconnexion automatique au cycle suivant.
+- MQTT automatique (identifiants du Supervisor) ou manuel (hôte, port, identifiant et mot de passe masqué).
+- Période cible de collecte configurable : mesurée du **début du cycle BLE au début du cycle BLE suivant**, et non comme une pause systématique à la fin. Publication MQTT lors des lectures réussies, indépendante du rafraîchissement de la page.
 
 ## Installation
 
@@ -36,10 +38,40 @@ Le Supervisor installe uniquement depuis la branche principale de ce dépôt. Le
 | `names` | `""` | Alias optionnels : `AA:BB:CC:DD:EE:FF=Batterie 1;11:22:33:44:55:66=Batterie 2` |
 | `scan_seconds` | `8` | Durée d'une recherche BLE |
 | `rescan_seconds` | `180` | Intervalle entre deux recherches BLE |
-| `poll_seconds` | `30` | Pause entre cycles complets de lecture |
+| `poll_seconds` | `30` | Période cible entre débuts des cycles de lecture complets. Inclut le temps BLE (min 10 s) |
+| `dashboard_refresh_seconds` | `20` | Actualisation automatique de la page Ingress (5–120 s) |
+| `mqtt_mode` | `auto` | `auto` utilise le service MQTT du Supervisor, `manual` prend les valeurs ci-dessous |
+| `mqtt_host` | `core-mosquitto` | Serveur MQTT pour le mode manuel |
+| `mqtt_port` | `1883` | Port TCP MQTT (par défaut non chiffré) |
+| `mqtt_username` | `""` | Identifiant MQTT fourni par le broker |
+| `mqtt_password` | `""` | Mot de passe masqué dans le formulaire |
+| `mqtt_tls` | `false` | Activer uniquement pour un serveur TLS correctement configuré |
 | `log_level` | `info` | `info`, `debug` ou `warning` |
 
 Les adresses personnelles de l'installation ne sont pas présentes dans le code.
+
+## Connexion MQTT manuelle (Mosquitto)
+
+Pour utiliser un utilisateur MQTT explicitement autorisé par Mosquitto, ouvrir l'onglet **Configuration** de Smart Docan BMS (sur Home Assistant, pas sur GitHub) :
+
+1. Mettre `mqtt_mode: manual`.
+2. Indiquer `mqtt_host: core-mosquitto`, `mqtt_port: 1883` si le broker Mosquitto officiel tourne sur cette même installation Home Assistant.
+3. Renseigner `mqtt_username` et `mqtt_password` correspondant à un compte MQTT dédié (créé/autorisé dans Mosquitto).
+4. Laisser `mqtt_tls: false` pour le port 1883 standard.
+5. **Enregistrer** puis **redémarrer** l'add-on. Vérifier "MQTT : Connecté" sur le dashboard et la présence des entités dans l'intégration MQTT de Home Assistant.
+
+En mode `auto`, `mqtt_host`, `mqtt_port`, `mqtt_username` et `mqtt_password` sont volontairement ignorés et les données du service Supervisor sont utilisées à la place. La déclaration du service est facultative (`mqtt:want`) pour permettre un broker externe.
+
+**Confidentialité** : le mot de passe est une option `password` masquée par le formulaire Home Assistant. Il est enregistré localement dans les options de l'add-on, jamais inclus dans ce dépôt ni exposé dans la page web ou les journaux. Ne pas partager de capture de l'écran de configuration avec des secrets visibles.
+
+## Régler la fréquence des remontées
+
+- `poll_seconds: 30` = lancement d'un cycle de lecture des quatre batteries au maximum toutes les 30 secondes. Si le cycle BLE prend 9 s, l'add-on attend 21 s. Si le cycle prend 38 s, le cycle suivant démarre sans pause additionnelle.
+- Les mesures sont publiées au broker MQTT après chaque interrogation d'une batterie; Home Assistant reçoit donc les nouveaux états à chaque cycle.
+- `dashboard_refresh_seconds: 20` = fréquence de rafraîchissement de la page web; ce paramètre **ne pilote pas** le Bluetooth et n'accélère pas les valeurs MQTT.
+- La page affiche la **durée du dernier cycle BLE complet** afin de vérifier si la période souhaitée est réalisable avec 4 BMS.
+
+Les options enregistrées prennent effet au redémarrage de l'add-on. Des délais trop courts peuvent dégrader la stabilité Bluetooth; commencer à 30 s et diminuer progressivement.
 
 ## Diagnostic MQTT et températures
 
@@ -57,7 +89,7 @@ Les adresses personnelles de l'installation ne sont pas présentes dans le code.
 - Les 16 valeurs de cellules sont créées **si** le BMS les fournit. Aucun capteur inventé ni tension simulée.
 - La synthèse courant/puissance suppose un **câblage parallèle**. Elle n'est pas adaptée à une architecture série ou mixte.
 - Les données sont indicatives ; ne les utilisez pas pour les protections critiques contre la surcharge, la sous-tension ou l'emballement thermique.
-- Cette version n'a pas encore été testée sur le Bluetooth du mini-PC de l'utilisateur. Les essais unitaires n'émulent pas une connexion Daren réelle.
+- La découverte et la lecture de 4 batteries Daren et de 64 cellules ont été vérifiées sur une installation réelle; MQTT manuel, répétition des lectures et reconnexion après incident restent à confirmer sur place.
 - Si la carte réseau Bluetooth n'est pas accessible depuis le conteneur, contrôler l'option `host_dbus` et les journaux. Ne pas désactiver AppArmor ou le mode protégé sans diagnostic.
 - Les mesures de capacité restante ou d'énergie stockée peuvent être calculées et sont alors des **estimations**, pas des compteurs d'énergie.
 
@@ -72,7 +104,11 @@ smart_docan_bms/
   app/
     run.py           # boucle Bluetooth et MQTT
     logic.py         # traitement des données
+    settings.py      # options MQTT et cadence
     dashboard.py     # interface HTML Ingress
+  translations/
+    fr.yaml
+    en.yaml
 tests/
   test_logic.py
 ```

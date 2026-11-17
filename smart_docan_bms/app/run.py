@@ -20,6 +20,7 @@ import paho.mqtt.client as mqtt
 
 from dashboard import start_dashboard
 from logic import aggregate, device_id, field_spec, normalise_sample
+from settings import mqtt_settings, remaining_poll_delay
 
 LOG = logging.getLogger("smart_docan")
 OPTIONS = Path("/data/options.json")
@@ -67,8 +68,14 @@ def mqtt_credentials() -> dict:
 
 class Store:
     """Thread-safe status shared by MQTT worker, Bluetooth loop, and dashboard."""
-    def __init__(self):
+    def __init__(self, poll_seconds: int = 30, dashboard_refresh_seconds: int = 20):
         self.lock = threading.RLock()
+        self.poll_seconds = poll_seconds
+        self.dashboard_refresh_seconds = dashboard_refresh_seconds
+        self.cycle_duration_seconds = None
+        self.cycle_completed_at = None
+        self.last_cycle_period_seconds = None
+        self._last_cycle_started_monotonic = None
         self.batteries: dict[str, dict] = {}
         self.aggregate: dict = {}
         self.mqtt_connected = False
@@ -110,6 +117,21 @@ class Store:
     def _refresh(self):
         self.aggregate = aggregate(list(self.batteries.values()), len(self.batteries))
 
+    def cycle_started(self) -> float:
+        now = time.monotonic()
+        with self.lock:
+            if self._last_cycle_started_monotonic is not None:
+                self.last_cycle_period_seconds = round(
+                    now - self._last_cycle_started_monotonic, 2
+                )
+            self._last_cycle_started_monotonic = now
+        return now
+
+    def cycle_finished(self, duration_seconds: float) -> None:
+        with self.lock:
+            self.cycle_duration_seconds = round(duration_seconds, 2)
+            self.cycle_completed_at = datetime.now(timezone.utc).isoformat()
+
     def snapshot(self) -> dict:
         with self.lock:
             # read-only JSON clone eliminates mutation while HTTP formats the page
@@ -120,6 +142,11 @@ class Store:
                 "mqtt_target": self.mqtt_target,
                 "mqtt_error": self.mqtt_error,
                 "mqtt_failures": self.mqtt_failures,
+                "poll_seconds": self.poll_seconds,
+                "dashboard_refresh_seconds": self.dashboard_refresh_seconds,
+                "cycle_duration_seconds": self.cycle_duration_seconds,
+                "last_cycle_period_seconds": self.last_cycle_period_seconds,
+                "cycle_completed_at": self.cycle_completed_at,
             }))
 
 class MQTTBridge:
@@ -127,7 +154,7 @@ class MQTTBridge:
         self.store = store
         self.announced: set[str] = set()
         # Don't display or log the credentials returned by Supervisor.
-        store.mqtt_target = f"{settings['host']}:{int(settings.get('port', 1883))} (TLS: {'oui' if settings.get('ssl') else 'non'})"
+        store.mqtt_target = f"{settings['host']}:{int(settings.get('port', 1883))} (TLS: {'oui' if settings.get('ssl') else 'non'}, mode {settings.get('mode', 'auto')})"
         store.mqtt_error = "Connexion initiale en cours"
         LOG.info("MQTT: connexion au broker %s", store.mqtt_target)
         self.client = mqtt.Client(
@@ -135,7 +162,8 @@ class MQTTBridge:
             client_id="smart-docan-bms",
             protocol=mqtt.MQTTv311,
         )
-        self.client.username_pw_set(settings.get("username", ""), settings.get("password", ""))
+        if settings.get("username"):
+            self.client.username_pw_set(settings["username"], settings.get("password", ""))
         if settings.get("ssl"):
             self.client.tls_set()
         self.client.will_set(f"{PREFIX}/bridge/status", "offline", qos=1, retain=True)
@@ -148,7 +176,9 @@ class MQTTBridge:
         self.client.loop_start()
 
     def _connected(self, client, userdata, flags, reason_code, properties):
-        self.store.mqtt_connected = int(reason_code) == 0
+        # Paho MQTT v2 passes a ReasonCode object, not an int.
+        # int(ReasonCode) raises TypeError and previously killed the MQTT worker.
+        self.store.mqtt_connected = getattr(reason_code, "value", reason_code) == 0
         self.announced.clear()
         if self.store.mqtt_connected:
             self.store.mqtt_error = ""
@@ -285,26 +315,25 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.0-dev — lecture seule, Bluetooth Daren")
+    LOG.info("Smart Docan BMS 0.1.2-dev — lecture seule, Bluetooth Daren")
     wanted = parse_addresses(settings.get("addresses", ""))
     labels = parse_names(settings.get("names", ""))
     if not settings.get("auto_discover", True) and not wanted:
         LOG.warning("Découverte automatique désactivée et aucune adresse configurée")
-    store = Store()
+    polling = int(settings["poll_seconds"])
+    refresh = int(settings.get("dashboard_refresh_seconds", 20))
+    store = Store(poll_seconds=polling, dashboard_refresh_seconds=refresh)
     start_dashboard(store.snapshot)
-    try:
-        bridge = MQTTBridge(mqtt_credentials(), store)
-    except Exception:
-        LOG.exception("MQTT requis : vérifier le service Mosquitto")
-        raise
+    bridge: MQTTBridge | None = None
+    next_mqtt_attempt = 0.0
+    LOG.info("Cadence cible de lecture et publication BMS: %d s; rafraîchissement écran: %d s",
+             polling, refresh)
     LOG.info("Dashboard Home Assistant disponible via Ingress (port interne 1895)")
     devices: dict[str, tuple] = {}  # address -> (BLEDevice, RSSI)
     known_info: dict[str, dict] = {}
     next_scan = 0.0
     scan_seconds = int(settings["scan_seconds"])
     rescan = int(settings["rescan_seconds"])
-    polling = int(settings["poll_seconds"])
-
     async def read_one(address: str, device, rssi):
         name = labels.get(address, device.name or address)
         store.scan(address, name, rssi)
@@ -343,11 +372,28 @@ async def run() -> None:
             LOG.warning("%s : lecture impossible (%s)", name, type(exc).__name__)
         finally:
             rec = next((r for r in store.snapshot()["batteries"] if r["address"] == address), None)
-            if rec:
+            if rec and bridge is not None:
                 bridge.battery(rec)
 
     try:
         while True:
+            cycle_started = store.cycle_started()
+            if bridge is None and cycle_started >= next_mqtt_attempt:
+                try:
+                    # In manual mode there is no Supervisor MQTT lookup.
+                    service = mqtt_credentials() if settings.get("mqtt_mode", "auto") == "auto" else None
+                    mqtt_config = mqtt_settings(settings, service)
+                    bridge = MQTTBridge(mqtt_config, store)
+                except Exception as exc:
+                    # MQTT failure must never stop Bluetooth telemetry or web UI.
+                    store.mqtt_connected = False
+                    if isinstance(exc, ValueError):
+                        store.mqtt_error = str(exc)
+                    else:
+                        store.mqtt_error = f"Configuration ou service MQTT indisponible ({type(exc).__name__})"
+                    LOG.warning("MQTT indisponible (%s), nouvelle tentative dans 60 secondes",
+                                type(exc).__name__)
+                next_mqtt_attempt = time.monotonic() + 60
             if time.monotonic() >= next_scan:
                 try:
                     found = await BleakScanner.discover(timeout=scan_seconds, return_adv=True)
@@ -373,10 +419,17 @@ async def run() -> None:
                 next_scan = time.monotonic() + rescan
             for address, (device, rssi) in sorted(devices.items()):
                 await read_one(address, device, rssi)
-            bridge.summary(store.snapshot()["aggregate"])
-            await asyncio.sleep(polling)
+            if bridge is not None:
+                bridge.summary(store.snapshot()["aggregate"])
+            elapsed = time.monotonic() - cycle_started
+            store.cycle_finished(elapsed)
+            remaining = remaining_poll_delay(elapsed, polling)
+            if remaining == 0:
+                LOG.debug("Le cycle BMS (%.1f s) atteint/dépasse la période cible (%d s)", elapsed, polling)
+            await asyncio.sleep(remaining)
     finally:
-        bridge.stop()
+        if bridge is not None:
+            bridge.stop()
 
 def main():
     try:

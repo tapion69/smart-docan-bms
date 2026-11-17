@@ -1,0 +1,38 @@
+configuration:
+  auto_discover:
+    name: Découverte automatique Bluetooth
+    description: Rechercher automatiquement tous les BMS DWF détectés
+  addresses:
+    name: Adresses Bluetooth (facultatif)
+    description: Limiter aux adresses saisies, séparées par une virgule
+  names:
+    name: Noms personnalisés (facultatif)
+    description: AA:BB:CC:DD:EE:FF=Batterie 1;11:22:33:44:55:66=Batterie 2
+  scan_seconds:
+    name: Durée de recherche Bluetooth (secondes)
+  poll_seconds:
+    name: Intervalle cible entre débuts des lectures BMS (secondes)
+    description: Chaque cycle lit toutes les batteries et publie les valeurs; si les 4 BMS prennent plus longtemps, la cadence sera limitée par le Bluetooth
+  rescan_seconds:
+    name: Fréquence de recherche des appareils (secondes)
+  dashboard_refresh_seconds:
+    name: Actualisation du tableau de bord (secondes)
+    description: Rafraîchissement de la page web uniquement, indépendant du Bluetooth
+  mqtt_mode:
+    name: Mode MQTT
+    description: auto = identifiants du Supervisor; manual = paramètres saisis ci-dessous
+  mqtt_host:
+    name: Serveur MQTT (mode manuel)
+    description: Par exemple core-mosquitto ou l’adresse IP du broker
+  mqtt_port:
+    name: Port MQTT (mode manuel)
+  mqtt_username:
+    name: Identifiant MQTT (mode manuel)
+    description: Un utilisateur autorisé à se connecter au broker
+  mqtt_password:
+    name: Mot de passe MQTT (mode manuel)
+  mqtt_tls:
+    name: Connexion MQTT sécurisée TLS (mode manuel)
+    description: Laisser désactivé pour le port 1883 de Mosquitto
+  log_level:
+    name: Niveau de journalisation

@@ -31,6 +31,10 @@ def render(snapshot: dict) -> str:
     def fmt(value, suffix=""):
         return ("—" if value is None else escape(str(value)) + suffix)
     status = "Connecté" if snapshot.get("mqtt_connected") else "Non connecté"
+    poll = int(snapshot.get("poll_seconds", 30))
+    refresh_seconds = int(snapshot.get("dashboard_refresh_seconds", 20))
+    cycle_duration = snapshot.get("cycle_duration_seconds")
+    cycle_period = snapshot.get("last_cycle_period_seconds")
     cards = []
     for item in records:
         d = item.get("data") or {}
@@ -92,7 +96,12 @@ def render(snapshot: dict) -> str:
     expected = summary.get("expected_count", 0)
     head = (
         f'<p class="muted">{count}/{expected} batteries en ligne · MQTT : {escape(status)} · '
-        'Lecture seule · Actualisation toutes les 20 secondes</p>'
+        f'Lecture seule · Lectures BMS / publications MQTT : cible {poll} s · '
+        f'Actualisation de cette page : {refresh_seconds} s</p>'
+        f'<p class="muted tag">Durée du dernier cycle complet : '
+        f'{fmt(cycle_duration, " s")} (recherche Bluetooth comprise). '
+        f'Intervalle réel entre les deux derniers cycles : {fmt(cycle_period, " s")}. '
+        'Si la durée d’un cycle dépasse la cible, le Bluetooth limite la cadence.</p>'
     )
     if not snapshot.get("mqtt_connected"):
         head += (
@@ -116,7 +125,7 @@ def render(snapshot: dict) -> str:
     return (
         '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<meta http-equiv="refresh" content="20"><title>Smart Docan BMS</title>'
+        f'<meta http-equiv="refresh" content="{refresh_seconds}"><title>Smart Docan BMS</title>'
         f'<style>{_CSS}</style></head><body><h1>Smart Docan BMS</h1>{head}'
         f'<main class="grid">{"".join(cards)}</main>'
         '<p class="muted footer">Données indicatives : ne pas utiliser pour une protection de batterie.</p></body></html>'

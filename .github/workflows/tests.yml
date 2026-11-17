@@ -20,6 +20,19 @@ jobs:
         run: docker build --pull -t smart-docan-bms:ci smart_docan_bms
       - name: Check runtime dependencies inside built image
         run: docker run --rm --entrypoint python smart-docan-bms:ci -c "import aiobmsble, bleak, paho.mqtt.client, run, logic, dashboard; print('Python imports OK')"
+      - name: MQTT manual authentication and Discovery against real Mosquitto
+        run: |
+          mkdir -p .ci-mosquitto
+          printf '%s\n' 'listener 18884 0.0.0.0' 'allow_anonymous false' 'password_file /mosquitto/config/passwd' > .ci-mosquitto/mosquitto.conf
+          docker run --rm -v "$PWD/.ci-mosquitto:/mosquitto/config" eclipse-mosquitto:2 mosquitto_passwd -c -b /mosquitto/config/passwd docan_ci ci-testing-password
+          sudo chmod 644 .ci-mosquitto/passwd
+          docker run -d --name docan-ci-mosquitto -p 18884:18884 -v "$PWD/.ci-mosquitto:/mosquitto/config" eclipse-mosquitto:2
+          trap 'docker rm -f docan-ci-mosquitto >/dev/null 2>&1 || true' EXIT
+          sleep 2
+          if ! docker run --rm --network host -v "$PWD/tests/mqtt_broker_smoke.py:/tmp/mqtt_broker_smoke.py:ro" --entrypoint python smart-docan-bms:ci /tmp/mqtt_broker_smoke.py; then
+            docker logs docan-ci-mosquitto
+            exit 1
+          fi
       - name: Check add-on metadata
         run: |
           python -m pip install PyYAML==6.0.3
@@ -28,7 +41,11 @@ jobs:
           with open("smart_docan_bms/config.yaml", encoding="utf-8") as stream:
               config = yaml.safe_load(stream)
           assert config["host_dbus"] is True
-          assert "mqtt:need" in config["services"]
+          assert "mqtt:want" in config["services"]
+          assert config["options"]["mqtt_mode"] == "auto"
+          assert config["schema"]["mqtt_password"] == "password"
+          assert config["options"]["poll_seconds"] >= 10
+          assert config["options"]["dashboard_refresh_seconds"] >= 5
           assert config["ingress_port"] == 1895
           assert set(config["arch"]) == {"amd64", "aarch64"}
           PY

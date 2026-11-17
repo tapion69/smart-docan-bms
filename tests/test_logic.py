@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "smart_docan_bms" /
 
 from logic import aggregate, device_id, field_spec, normalise_sample
 from dashboard import render
+from settings import mqtt_settings, remaining_poll_delay
 
 class LogicTests(unittest.TestCase):
     def test_cells_all_available(self):
@@ -68,6 +69,57 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(device_id("AA:BB:CC:DD:EE:FF"), "docan_aabbccddeeff")
         self.assertEqual(field_spec("cell_16")[0], "Tension cellule 16")
         self.assertIsNone(field_spec("temp_type_01"))
+
+    def test_mqtt_manual_uses_explicit_credentials(self):
+        opts = {"mqtt_mode": "manual", "mqtt_host": "core-mosquitto",
+                "mqtt_port": 1883, "mqtt_username": "docan_user",
+                "mqtt_password": "a-private-example", "mqtt_tls": False}
+        service = {"host": "other-broker", "port": 7777, "username": "from_supervisor"}
+        conf = mqtt_settings(opts, service)
+        self.assertEqual(conf["host"], "core-mosquitto")
+        self.assertEqual(conf["port"], 1883)
+        self.assertEqual(conf["username"], "docan_user")
+        self.assertEqual(conf["password"], "a-private-example")
+        self.assertEqual(conf["mode"], "manual")
+
+    def test_mqtt_auto_keeps_supervisor_credentials(self):
+        opts = {"mqtt_mode": "auto", "mqtt_host": "ignored",
+                "mqtt_username": "ignored", "mqtt_password": "ignored"}
+        service = {"host": "core-mosquitto", "port": 1883, "username": "auto_user",
+                   "password": "auto_password", "ssl": False}
+        conf = mqtt_settings(opts, service)
+        self.assertEqual(conf["username"], "auto_user")
+        self.assertEqual(conf["password"], "auto_password")
+        self.assertEqual(conf["mode"], "auto")
+
+    def test_mqtt_manual_configuration_is_validated(self):
+        with self.assertRaisesRegex(ValueError, "mqtt_host"):
+            mqtt_settings({"mqtt_mode": "manual", "mqtt_host": ""})
+        with self.assertRaisesRegex(ValueError, "mqtt_username"):
+            mqtt_settings({"mqtt_mode": "manual", "mqtt_host": "local",
+                           "mqtt_username": "", "mqtt_password": "secret"})
+        with self.assertRaisesRegex(ValueError, "mqtt_port"):
+            mqtt_settings({"mqtt_mode": "manual", "mqtt_host": "local", "mqtt_port": 0})
+        with self.assertRaisesRegex(ValueError, "Supervisor"):
+            mqtt_settings({"mqtt_mode": "auto"}, None)
+
+    def test_poll_period_includes_the_four_bms_read_duration(self):
+        self.assertEqual(remaining_poll_delay(0, 30), 30)
+        self.assertEqual(remaining_poll_delay(12.0, 30), 18.0)
+        self.assertEqual(remaining_poll_delay(36.0, 30), 0.0)
+        self.assertEqual(remaining_poll_delay(-1.0, 30), 30.0)
+
+    def test_dashboard_refresh_and_polling_are_independent(self):
+        html = render({
+            "batteries": [], "aggregate": {"expected_count": 0, "online_count": 0},
+            "mqtt_connected": False, "poll_seconds": 45,
+            "dashboard_refresh_seconds": 11, "cycle_duration_seconds": 8.4,
+            "last_cycle_period_seconds": 45.5,
+        })
+        self.assertIn('http-equiv="refresh" content="11"', html)
+        self.assertIn("cible 45 s", html)
+        self.assertIn("8.4 s", html)
+        self.assertIn("45.5 s", html)
 
     def test_render_offline_mqtt_without_exposing_secrets(self):
         html = render({
