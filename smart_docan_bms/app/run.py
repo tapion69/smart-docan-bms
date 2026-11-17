@@ -74,6 +74,8 @@ class Store:
         self.dashboard_refresh_seconds = dashboard_refresh_seconds
         self.cycle_duration_seconds = None
         self.cycle_completed_at = None
+        self.last_cycle_period_seconds = None
+        self._last_cycle_started_monotonic = None
         self.batteries: dict[str, dict] = {}
         self.aggregate: dict = {}
         self.mqtt_connected = False
@@ -115,6 +117,16 @@ class Store:
     def _refresh(self):
         self.aggregate = aggregate(list(self.batteries.values()), len(self.batteries))
 
+    def cycle_started(self) -> float:
+        now = time.monotonic()
+        with self.lock:
+            if self._last_cycle_started_monotonic is not None:
+                self.last_cycle_period_seconds = round(
+                    now - self._last_cycle_started_monotonic, 2
+                )
+            self._last_cycle_started_monotonic = now
+        return now
+
     def cycle_finished(self, duration_seconds: float) -> None:
         with self.lock:
             self.cycle_duration_seconds = round(duration_seconds, 2)
@@ -133,6 +145,7 @@ class Store:
                 "poll_seconds": self.poll_seconds,
                 "dashboard_refresh_seconds": self.dashboard_refresh_seconds,
                 "cycle_duration_seconds": self.cycle_duration_seconds,
+                "last_cycle_period_seconds": self.last_cycle_period_seconds,
                 "cycle_completed_at": self.cycle_completed_at,
             }))
 
@@ -362,7 +375,7 @@ async def run() -> None:
 
     try:
         while True:
-            cycle_started = time.monotonic()
+            cycle_started = store.cycle_started()
             if bridge is None and cycle_started >= next_mqtt_attempt:
                 try:
                     # In manual mode there is no Supervisor MQTT lookup.
