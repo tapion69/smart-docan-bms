@@ -16,6 +16,10 @@ jobs:
         run: python -m compileall -q smart_docan_bms/app tests
       - name: Pure offline unit tests
         run: python -m unittest discover -s tests -v
+      - name: Build Home Assistant add-on Docker image
+        run: docker build --pull -t smart-docan-bms:ci smart_docan_bms
+      - name: Check runtime dependencies inside built image
+        run: docker run --rm --entrypoint python smart-docan-bms:ci -c "import aiobmsble, bleak, paho.mqtt.client, run, logic, dashboard; print('Python imports OK')"
       - name: Check add-on metadata
         run: |
           python -m pip install PyYAML==6.0.3
