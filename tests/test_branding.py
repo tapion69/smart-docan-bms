@@ -10,7 +10,7 @@ class BrandingTests(unittest.TestCase):
         logos = [(ROOT / name).read_bytes() for name in ("icon.png", "logo.png")]
         self.assertEqual(logos[0], logos[1])
         for image in logos:
-            self.assertEqual(image[:8], b"\\x89PNG\\r\\n\\x1a\\n")
+            self.assertEqual(image[:8], bytes([137, 80, 78, 71, 13, 10, 26, 10]))
             width, height = struct.unpack(">II", image[16:24])
             self.assertEqual((width, height), (192, 192))
             self.assertGreater(len(image), 1000)
