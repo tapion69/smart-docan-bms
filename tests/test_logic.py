@@ -115,8 +115,11 @@ class LogicTests(unittest.TestCase):
             updated = SlotAssignments(path, {"slot_1_address": b})
             self.assertEqual(updated.slot_for(b), 1)
             self.assertEqual(updated.slot_for(a), None)
+            switched = SlotAssignments(path, {"slot_2_address": b})
+            self.assertEqual(switched.slot_for(b), 2)
+            self.assertNotIn(1, dict(switched.configured()))
             with self.assertRaisesRegex(ValueError, "deux batteries"):
-                SlotAssignments(path, {"slot_2_address": b})
+                SlotAssignments(path, {"slot_1_address": b, "slot_2_address": b})
 
     def test_global_and_binary_unique_ids(self):
         topic, cfg = global_discovery("battery_level")
