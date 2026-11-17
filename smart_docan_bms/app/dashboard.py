@@ -130,7 +130,7 @@ def render(snapshot: dict) -> str:
         f'<meta http-equiv="refresh" content="{refresh_seconds}"><title>Smart Docan BMS</title>'
         f'<style>{_CSS}</style></head><body>'
         '<div class="app-brand"><img src="logo.png" alt="Smart Docan BMS">'
-        '<h1>Smart Docan BMS</h1></div>' + head
+        f'<h1>Smart Docan BMS</h1></div>{head}'
         f'<main class="grid">{"".join(cards)}</main>'
         '<p class="muted footer">Données indicatives : ne pas utiliser pour une protection de batterie.</p></body></html>'
     )
