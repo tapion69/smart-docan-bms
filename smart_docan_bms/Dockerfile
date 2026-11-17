@@ -11,7 +11,4 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 WORKDIR /app
 COPY app/ /app/
-COPY icon.png logo.png /app/
-
-EXPOSE 1895
 CMD ["python", "/app/run.py"]
