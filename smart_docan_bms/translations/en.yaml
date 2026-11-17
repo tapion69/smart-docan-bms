@@ -37,6 +37,12 @@ configuration:
   missing_rescan_seconds:
     name: Rescan interval while an assigned BMS is missing (seconds)
     description: Scan more often only when one of the saved battery slots has not been detected
+  recover_stale_connections:
+    name: Recover stuck Bluetooth connections per battery
+    description: Off by default. Disconnect only the missing BMS after several failed scans; may interrupt another active client for that BMS
+  stale_connection_after_seconds:
+    name: Targeted Bluetooth recovery delay (seconds)
+    description: Minimum gap without advertisements or successful reads and at least 2 missed scans; at most once per battery per hour
   mqtt_mode:
     name: MQTT connection mode
     description: auto = Supervisor credentials; manual = credentials entered below
