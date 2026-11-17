@@ -2,7 +2,7 @@
 
 Add-on **Home Assistant OS / Supervised** pour les batteries **Docan Power NOON équipées d'un BMS Daren** diffusant un nom Bluetooth commençant par `DWF`.
 
-> **Statut : 0.1.3-dev — développement, validé sur une première installation à 4 batteries.**
+> **Statut : 0.1.4-dev — développement, validé sur une première installation à 4 batteries.**
 > La lecture des 64 cellules a été confirmée sur cette installation. La connexion MQTT reste à valider sur le matériel cible après configuration manuelle.
 > Ce projet n'effectue aucune commande de configuration des BMS : uniquement des requêtes de télémétrie. Il ne remplace **jamais** les protections du BMS.
 
@@ -74,7 +74,7 @@ Le logo choisi pour Smart Docan BMS (batterie à quatre cellules vertes, connexi
 | `names` | `""` | Ancienne option conservée pour compatibilité (utiliser désormais `slot_1_name` à `slot_4_name`) |
 | `scan_seconds` | `8` | Durée d'une recherche BLE |
 | `rescan_seconds` | `180` | Intervalle entre deux recherches BLE |
-| `poll_seconds` | `30` | Période cible entre débuts des cycles de lecture complets. Inclut le temps BLE (min 10 s) |
+| `poll_seconds` | `30` | Période cible entre débuts des cycles de lecture complets. Inclut le temps BLE (minimum configurable : 5 s) |
 | `dashboard_refresh_seconds` | `20` | Actualisation automatique de la page Ingress (5–120 s) |
 | `mqtt_mode` | `auto` | `auto` utilise le service MQTT du Supervisor, `manual` prend les valeurs ci-dessous |
 | `mqtt_host` | `core-mosquitto` | Serveur MQTT pour le mode manuel |
@@ -107,7 +107,7 @@ En mode `auto`, `mqtt_host`, `mqtt_port`, `mqtt_username` et `mqtt_password` son
 - `dashboard_refresh_seconds: 20` = fréquence de rafraîchissement de la page web; ce paramètre **ne pilote pas** le Bluetooth et n'accélère pas les valeurs MQTT.
 - La page affiche la **durée du dernier cycle BLE complet** afin de vérifier si la période souhaitée est réalisable avec 4 BMS.
 
-Les options enregistrées prennent effet au redémarrage de l'add-on. Des délais trop courts peuvent dégrader la stabilité Bluetooth; commencer à 30 s et diminuer progressivement.
+Les options enregistrées prennent effet au redémarrage de l'add-on. La valeur `poll_seconds: 5` est autorisée depuis 0.1.4-dev. Avec quatre batteries lues successivement, si les quatre échanges Bluetooth demandent plus de cinq secondes, la cadence réelle sera plus longue : aucune lecture en parallèle ni accélération forcée. Des délais trop courts peuvent dégrader la stabilité Bluetooth ; commencer à 30 s et diminuer progressivement.
 
 ## Diagnostic MQTT et températures
 
