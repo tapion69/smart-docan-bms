@@ -72,6 +72,9 @@ class Store:
         self.batteries: dict[str, dict] = {}
         self.aggregate: dict = {}
         self.mqtt_connected = False
+        self.mqtt_target = "Indéterminé"
+        self.mqtt_error = "Connexion en attente"
+        self.mqtt_failures = 0
 
     def scan(self, address: str, name: str, rssi: int | None):
         with self.lock:
@@ -84,11 +87,12 @@ class Store:
             if rssi is not None:
                 rec["rssi"] = rssi
 
-    def success(self, address: str, data: dict, info: dict):
+    def success(self, address: str, data: dict, info: dict, temperature_diagnostic: str = ""):
         with self.lock:
             rec = self.batteries[address]
             rec.update(data=data, online=True, failures=0, error=None,
-                       last_seen=data["last_seen"])
+                       last_seen=data["last_seen"],
+                       temperature_diagnostic=temperature_diagnostic)
             if info:
                 rec["info"] = info
             self._refresh()
@@ -113,12 +117,19 @@ class Store:
                 "batteries": sorted(self.batteries.values(), key=lambda x: x["address"]),
                 "aggregate": self.aggregate,
                 "mqtt_connected": self.mqtt_connected,
+                "mqtt_target": self.mqtt_target,
+                "mqtt_error": self.mqtt_error,
+                "mqtt_failures": self.mqtt_failures,
             }))
 
 class MQTTBridge:
     def __init__(self, settings: dict, store: Store):
         self.store = store
         self.announced: set[str] = set()
+        # Don't display or log the credentials returned by Supervisor.
+        store.mqtt_target = f"{settings['host']}:{int(settings.get('port', 1883))} (TLS: {'oui' if settings.get('ssl') else 'non'})"
+        store.mqtt_error = "Connexion initiale en cours"
+        LOG.info("MQTT: connexion au broker %s", store.mqtt_target)
         self.client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
             client_id="smart-docan-bms",
@@ -130,7 +141,9 @@ class MQTTBridge:
         self.client.will_set(f"{PREFIX}/bridge/status", "offline", qos=1, retain=True)
         self.client.reconnect_delay_set(min_delay=2, max_delay=60)
         self.client.on_connect = self._connected
+        self.client.on_connect_fail = self._connect_failed
         self.client.on_disconnect = self._disconnected
+        self.client.enable_logger(LOG)
         self.client.connect_async(settings["host"], int(settings.get("port", 1883)), keepalive=60)
         self.client.loop_start()
 
@@ -138,15 +151,29 @@ class MQTTBridge:
         self.store.mqtt_connected = int(reason_code) == 0
         self.announced.clear()
         if self.store.mqtt_connected:
-            LOG.info("MQTT connecté")
+            self.store.mqtt_error = ""
+            self.store.mqtt_failures = 0
+            LOG.info("MQTT connecté : %s", self.store.mqtt_target)
             self.publish(f"{PREFIX}/bridge/status", "online")
         else:
-            LOG.warning("Connexion MQTT refusée (code %s)", reason_code)
+            self.store.mqtt_failures += 1
+            self.store.mqtt_error = f"Connexion refusée par le broker (code {reason_code})"
+            LOG.warning("MQTT : %s", self.store.mqtt_error)
+
+    def _connect_failed(self, client, userdata):
+        """Called by paho loop_start when TCP/TLS connection fails."""
+        self.store.mqtt_connected = False
+        self.store.mqtt_failures += 1
+        self.store.mqtt_error = "Connexion TCP/TLS impossible (hôte, port, réseau ou certificat)"
+        if self.store.mqtt_failures <= 3 or self.store.mqtt_failures % 10 == 0:
+            LOG.warning("MQTT: connexion impossible vers %s (tentative %d)",
+                        self.store.mqtt_target, self.store.mqtt_failures)
 
     def _disconnected(self, client, userdata, disconnect_flags, reason_code, properties):
         self.store.mqtt_connected = False
         self.announced.clear()
-        LOG.warning("MQTT déconnecté (code %s)", reason_code)
+        self.store.mqtt_error = f"Déconnecté du broker (code {reason_code})"
+        LOG.warning("MQTT : %s", self.store.mqtt_error)
 
     def publish(self, topic: str, payload: str | dict, retain: bool = True):
         if not self.store.mqtt_connected:
@@ -296,7 +323,18 @@ async def run() -> None:
                         LOG.info("Informations firmware indisponibles pour %s : %s", name, type(exc).__name__)
                         known_info[address] = {}
             data = normalise_sample(sample, rssi)
-            store.success(address, data, known_info[address])
+            temperature_format = "temp_values" if "temp_values" in sample else "temperature"
+            raw_temps = sample.get(temperature_format)
+            count = len(raw_temps) if isinstance(raw_temps, (list, tuple)) else 0
+            scalar = sample.get("temperature") if isinstance(sample.get("temperature"), (int, float)) else None
+            temp_diagnostic = (
+                f"Sondes annoncées: {data.get('temp_count', '?')}; "
+                f"sondes décodées: {count}; moyenne: {scalar if scalar is not None else '?'}; "
+                f"source: {temperature_format}"
+            )
+            store.success(address, data, known_info[address], temp_diagnostic)
+            if count == 0:
+                LOG.info("%s : températures absentes du décodage (%s)", name, temp_diagnostic)
             LOG.info("%s : SOC %s %% ; %s V ; %s cellules",
                      name, data.get("battery_level", "?"), data.get("voltage", "?"),
                      len([k for k in data if re.fullmatch(r"cell_\d+", k)]))

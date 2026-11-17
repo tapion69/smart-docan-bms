@@ -17,6 +17,10 @@ small{color:#97abbd}h2{font-size:17px;margin:2px 0 14px}h3{font-size:14px;color:
 .cells{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}.cell{background:#253747;border-radius:6px;padding:8px;text-align:center}
 .cell span{display:block;color:#a8b6c4;font-size:11px}.cell b{font-size:13px}
 .tag{font-size:12px}.warn{background:#4c302e}.footer{font-size:12px;margin-top:18px}
+.warning{background:#442a2e;border:1px solid #9b515c;border-radius:10px;padding:12px;margin:12px 0}
+details{background:#14212d;padding:10px;border-radius:10px;margin-top:12px}
+summary{cursor:pointer;color:#c6d4e2}dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+dt{color:#91a9bb;font-size:12px}dd{margin:0;font-weight:600;overflow-wrap:anywhere}
 @media(max-width:450px){body{padding:12px}.chips{grid-template-columns:repeat(2,1fr)}.cells{grid-template-columns:repeat(4,1fr)}}
 """
 
@@ -51,11 +55,33 @@ def render(snapshot: dict) -> str:
         temps = ", ".join(f'Sonde {int(key[5:])}: {fmt(value, " °C")}' for key, value in temp_items) or "Non disponible"
         alerts = escape(", ".join(d.get("problems", [])) or ("Alarme signalée" if d.get("problem") else "Aucune alarme signalée"))
         error = escape(item.get("error") or "")
+        detail_fields = (
+            ("design_capacity", "Capacité nominale", " Ah"),
+            ("cycle_charge", "Capacité restante", " Ah"),
+            ("stored_energy_wh", "Énergie stockée estimée", " Wh"),
+            ("cell_min_index", "Cellule minimale n°", ""),
+            ("cell_max_index", "Cellule maximale n°", ""),
+            ("cell_min_voltage", "Tension minimale", " V"),
+            ("cell_max_voltage", "Tension maximale", " V"),
+            ("temp_count", "Nombre de sondes annoncé", ""),
+            ("balancer", "Équilibrage", ""),
+            ("chrg_mosfet", "MOSFET charge", ""),
+            ("dischrg_mosfet", "MOSFET décharge", ""),
+            ("problem_code", "Code diagnostic", ""),
+        )
+        details = "".join(
+            f"<div><dt>{title}</dt><dd>{fmt(d[key], unit)}</dd></div>"
+            for key, title, unit in detail_fields if key in d
+        )
+        temp_debug = escape(item.get("temperature_diagnostic") or "Données non renseignées")
         cards.append(
             f'<section class="card"><h2>{name} <span class="{hue} tag">• {state}</span></h2>'
             f'<div class="chips">{chips}</div><h3>Cellules ({len(cell_items)})</h3>'
             f'<div class="cells">{cells or "<small>En attente des données</small>"}</div>'
-            f'<h3>Températures</h3><p>{temps}</p><h3>Diagnostic</h3><p>{alerts}</p>'
+            f'<h3>Températures</h3><p>{temps}</p>'
+            f'<p class="muted tag">{temp_debug if not temp_items else ""}</p>'
+            f'<h3>Diagnostic</h3><p>{alerts}</p>'
+            f'<details><summary>Autres informations disponibles</summary><dl>{details}</dl></details>'
             f'<p class="muted tag">Signal : {fmt(d.get("rssi"), " dBm")} | '
             f'Cycles : {fmt(d.get("cycles"))} | Dernière lecture : {fmt(item.get("last_seen"))}'
             f'<br>{error}</p></section>'
@@ -68,6 +94,15 @@ def render(snapshot: dict) -> str:
         f'<p class="muted">{count}/{expected} batteries en ligne · MQTT : {escape(status)} · '
         'Lecture seule · Actualisation toutes les 20 secondes</p>'
     )
+    if not snapshot.get("mqtt_connected"):
+        head += (
+            '<div class="warning"><strong>MQTT non connecté</strong>'
+            f'<p>Broker : {escape(snapshot.get("mqtt_target") or "Non déterminé")}<br>'
+            f'Diagnostic : {escape(snapshot.get("mqtt_error") or "En attente de connexion")}<br>'
+            f'Échecs constatés : {fmt(snapshot.get("mqtt_failures", 0))}</p>'
+            '<small>Le Bluetooth reste opérationnel. Consulter le journal de l’add-on et le broker Mosquitto.</small>'
+            '</div>'
+        )
     if summary.get("complete"):
         head += (
             '<div class="grid"><section class="card"><h2>Parc batteries (câblage parallèle)</h2>'

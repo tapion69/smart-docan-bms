@@ -5,6 +5,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "smart_docan_bms" / "app"))
 
 from logic import aggregate, device_id, field_spec, normalise_sample
+from dashboard import render
 
 class LogicTests(unittest.TestCase):
     def test_cells_all_available(self):
@@ -24,6 +25,28 @@ class LogicTests(unittest.TestCase):
         d = normalise_sample({"temperature": [Temp(), 18.1]})
         self.assertAlmostEqual(d["temperature"], 17.7)
         self.assertEqual(d["temp_01"], 17.3)
+
+    def test_v033_daren_temperature_schema(self):
+        class Probe:
+            def __init__(self, value, name):
+                self.value = value
+                self.type = type("Type", (), {"name": name})()
+
+        sample = {
+            "temp_sensors": 3,
+            "temp_values": [Probe(16.1, "CELL"), Probe(18.2, "CELL"),
+                            Probe(21.1, "MOSFET")],
+            "temperature": 17.15,
+            "delta_voltage": 0.002,
+        }
+        out = normalise_sample(sample)
+        self.assertEqual(out["temp_count"], 3)
+        self.assertEqual(out["temp_01"], 16.1)
+        self.assertEqual(out["temp_02"], 18.2)
+        self.assertEqual(out["temp_03"], 21.1)
+        self.assertEqual(out["temp_type_03"], "MOSFET")
+        self.assertEqual(out["temperature"], 17.15)
+        self.assertEqual(out["delta_cell_voltage"], 0.002)
 
     def test_parallel_weighted_aggregate(self):
         sample1 = {"battery_level": 40, "design_capacity": 200, "voltage": 52, "current": -4, "power": -208}
@@ -45,6 +68,33 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(device_id("68:09:47:41:81:BE"), "docan_6809474181be")
         self.assertEqual(field_spec("cell_16")[0], "Tension cellule 16")
         self.assertIsNone(field_spec("temp_type_01"))
+
+    def test_render_offline_mqtt_without_exposing_secrets(self):
+        html = render({
+            "batteries": [{"name": "Batterie A", "address": "00:00:00:00:00:01",
+                          "online": True, "data": {"battery_level": 35, "cell_01": 3.3},
+                          "temperature_diagnostic": "Sondes annoncées: 4; données reçues: 0"}],
+            "aggregate": {"online_count": 1, "expected_count": 1, "complete": True},
+            "mqtt_connected": False, "mqtt_target": "core-mosquitto:1883",
+            "mqtt_error": "Connexion TCP impossible", "mqtt_failures": 4,
+        })
+        self.assertIn("MQTT non connecté", html)
+        self.assertIn("core-mosquitto:1883", html)
+        self.assertIn("Connexion TCP impossible", html)
+        self.assertIn("Sondes annoncées: 4", html)
+        self.assertIn("Cellule 1", html)
+        self.assertIn("Autres informations disponibles", html)
+
+    def test_render_html_escapes_bms_data(self):
+        html = render({
+            "batteries": [{"name": "<script>alert(1)</script>", "online": False,
+                           "data": {}, "temperature_diagnostic": "<bad>"}],
+            "aggregate": {"online_count": 0, "expected_count": 1, "complete": False},
+            "mqtt_connected": True,
+        })
+        self.assertNotIn("<script>", html)
+        self.assertNotIn("<bad>", html)
+        self.assertIn("&lt;script&gt;", html)
 
 if __name__ == "__main__":
     unittest.main()
