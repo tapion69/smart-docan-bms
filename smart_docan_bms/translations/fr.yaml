@@ -41,6 +41,12 @@ configuration:
   missing_rescan_seconds:
     name: Nouvelle recherche si batterie manquante (secondes)
     description: Recherche plus fréquente uniquement lorsqu'une batterie affectée à un emplacement n'est pas vue au scan (30 s conseillé)
+  recover_stale_connections:
+    name: Récupération ciblée des connexions Bluetooth bloquées
+    description: Désactivé par défaut. Après plusieurs recherches sans résultat, autoriser la déconnexion de la batterie absente uniquement (peut interrompre une autre application connectée à ce BMS)
+  stale_connection_after_seconds:
+    name: Délai avant récupération Bluetooth ciblée (secondes)
+    description: Attendre au moins ce délai sans annonce ni lecture, avec 2 scans manqués minimum. Une tentative maximum par batterie et par heure
   mqtt_mode:
     name: Mode MQTT
     description: auto = identifiants du Supervisor; manual = paramètres saisis ci-dessous
