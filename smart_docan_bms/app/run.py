@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 from aiobmsble import BMSConfig
 from aiobmsble.bms.daren_bms import BMS
 from bleak import BleakScanner
+from bleak_retry_connector import close_stale_connections_by_address
 import paho.mqtt.client as mqtt
 
 from logic import aggregate, normalise_sample
@@ -24,7 +25,9 @@ from discovery import (
 )
 from settings import mqtt_settings, remaining_poll_delay
 from slots import SlotAssignments, MAX_SLOTS, slot_device_id
-from recovery import is_attempt_due, missing_slots, scan_interval
+from recovery import (
+    can_recover_stale_connection, is_attempt_due, missing_slots, scan_interval,
+)
 
 LOG = logging.getLogger("smart_docan")
 OPTIONS = Path("/data/options.json")
@@ -48,7 +51,10 @@ def load_options() -> dict:
     defaults = {
         "auto_discover": True, "addresses": "", "names": "", "scan_seconds": 8,
         "poll_seconds": 30, "rescan_seconds": 180,
-        "missing_rescan_seconds": 30, "log_level": "info",
+        "missing_rescan_seconds": 30,
+        "recover_stale_connections": False,
+        "stale_connection_after_seconds": 180,
+        "log_level": "info",
         "strict_slots": False, "migrate_legacy_entities": True,
     }
     if OPTIONS.exists():
@@ -289,7 +295,7 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.6-dev — auto-récupération BLE, sans interface web")
+    LOG.info("Smart Docan BMS 0.1.7-dev — récupération BlueZ ciblée sur demande")
     wanted = parse_addresses(settings.get("addresses", ""))
     slots = SlotAssignments(Path("/data/slots.json"), settings)
     if not settings.get("auto_discover", True) and not wanted and not slots.configured():
@@ -309,10 +315,22 @@ async def run() -> None:
     scan_seconds = int(settings["scan_seconds"])
     rescan = int(settings["rescan_seconds"])
     missing_rescan = int(settings.get("missing_rescan_seconds", 30))
+    recover_stale = bool(settings.get("recover_stale_connections", False))
+    stale_after = int(settings.get("stale_connection_after_seconds", 180))
     last_attempts: dict[str, float] = {}
+    last_success_at: dict[str, float] = {}
+    missing_since: dict[int, float] = {}
+    missed_scans: dict[int, int] = {}
+    last_cleanup_at: dict[int, float] = {}
     previous_missing_slots: set[int] = set()
     LOG.info("Recherche BLE normale %d s, recherche si batterie absente %d s",
              rescan, missing_rescan)
+    LOG.info(
+        "Déconnexion BlueZ ciblée : %s ; absence minimale %d s ; "
+        "limite 1 tentative par batterie et par heure",
+        "activée" if recover_stale else "désactivée",
+        stale_after,
+    )
 
     async def read_one(address: str, device, rssi):
         slot = slots.slot_for(address)
@@ -415,6 +433,13 @@ async def run() -> None:
                         devices[address] = (device, rssi)
 
                     missing = set(missing_slots(slots.configured(), set(assigned)))
+                    now_scan = time.monotonic()
+                    for slot in missing:
+                        missing_since.setdefault(slot, now_scan)
+                        missed_scans[slot] = missed_scans.get(slot, 0) + 1
+                    for slot in set(missed_scans) - missing:
+                        missing_since.pop(slot, None)
+                        missed_scans.pop(slot, None)
                     newly_missing = missing - previous_missing_slots
                     recovered = previous_missing_slots - missing
                     for slot in sorted(newly_missing):
@@ -451,6 +476,7 @@ async def run() -> None:
                 ok = await read_one(address, device, rssi)
                 if ok:
                     last_attempts.pop(address, None)
+                    last_success_at[address] = time.monotonic()
                 else:
                     last_attempts[address] = time.monotonic()
                     failures = store.batteries[address]["failures"]
@@ -464,6 +490,45 @@ async def run() -> None:
                             "périmée et recherche accélérée (sans redémarrer le Bluetooth)",
                             slots.slot_for(address), failures
                         )
+            # Opt-in recovery for a BlueZ connection that is stuck while the
+            # assigned battery no longer advertises and cannot be read.
+            # This affects only that BLE address, never hci0 or healthy slots.
+            if recover_stale:
+                for slot, address in slots.configured():
+                    now = time.monotonic()
+                    if not can_recover_stale_connection(
+                        enabled=True,
+                        missed_scans=missed_scans.get(slot, 0),
+                        missing_since=missing_since.get(slot),
+                        last_success=last_success_at.get(address),
+                        last_cleanup=last_cleanup_at.get(slot),
+                        now=now,
+                        absent_seconds=stale_after,
+                    ):
+                        continue
+                    last_cleanup_at[slot] = now  # also rate-limit failures
+                    LOG.warning(
+                        "Batterie %d : toujours absente du scan et sans lecture "
+                        "depuis %d s, tentative de déconnexion BlueZ ciblée",
+                        slot, stale_after,
+                    )
+                    try:
+                        async with asyncio.timeout(12):
+                            await close_stale_connections_by_address(address)
+                        LOG.info(
+                            "Batterie %d : demande de nettoyage BlueZ terminée ; "
+                            "recherche du BMS relancée", slot
+                        )
+                    except Exception as exc:
+                        LOG.warning(
+                            "Batterie %d : déconnexion ciblée refusée/échouée (%s). "
+                            "Aucune modification des permissions ou de hci0",
+                            slot, type(exc).__name__,
+                        )
+                    # Don't reuse a potentially stale BLEDevice instance.
+                    devices.pop(address, None)
+                    next_scan = min(next_scan, time.monotonic() + 2)
+
             if bridge is not None:
                 snapshot = store.snapshot()
                 # Publish offline availability even for currently missing assigned slots.
