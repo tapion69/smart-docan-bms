@@ -45,6 +45,7 @@ jobs:
           assert config["options"]["mqtt_mode"] == "auto"
           assert config["schema"]["mqtt_password"] == "password"
           assert config["schema"]["poll_seconds"] == "int(5,300)"
+          assert config["schema"]["missing_rescan_seconds"] == "int(15,180)"
           assert "dashboard_refresh_seconds" not in config["schema"]
           assert "ingress" not in config
           assert "ingress_port" not in config
