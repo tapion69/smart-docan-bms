@@ -266,23 +266,26 @@ class MQTTBridge:
 
     def summary(self, summary: dict) -> None:
         base = f"{PREFIX}/global"
-        if summary.get("complete"):
-            for key, *_ in GLOBAL_FIELDS:
-                if key not in summary:
-                    continue
-                topic, config = global_discovery(key)
-                uid = config["unique_id"]
-                if uid not in self.announced:
-                    self.publish(topic, config)
-                    if self.store.mqtt_connected:
-                        self.announced.add(uid)
-            self.publish(f"{base}/state", summary)
-            if self.store.mqtt_connected and self.migrate_legacy and not self.old_global_cleaned:
-                for topic in legacy_global_topics():
-                    self.publish(topic, "")
-                self.old_global_cleaned = True
-                LOG.info("Migration MQTT des anciennes entités globales effectuée")
-        self.publish(f"{base}/availability", "online" if summary.get("complete") else "offline")
+        # Republish discovery after MQTT reconnect, even if not all BMS are
+        # reachable. Status sensors must keep working during an outage.
+        for key, *_ in GLOBAL_FIELDS:
+            topic, config = global_discovery(key)
+            uid = config["unique_id"]
+            if uid not in self.announced:
+                self.publish(topic, config)
+                if self.store.mqtt_connected:
+                    self.announced.add(uid)
+        self.publish(f"{base}/state", summary)
+        self.publish(f"{base}/availability", "online")
+        self.publish(
+            f"{base}/measurements_availability",
+            "online" if summary.get("complete") else "offline",
+        )
+        if self.store.mqtt_connected and self.migrate_legacy and not self.old_global_cleaned:
+            for topic in legacy_global_topics():
+                self.publish(topic, "")
+            self.old_global_cleaned = True
+            LOG.info("Migration MQTT des anciennes entités globales effectuée")
 
     def stop(self):
         self.client.publish(f"{PREFIX}/bridge/status", "offline", qos=1, retain=True)
@@ -295,13 +298,15 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.7-dev — récupération BlueZ ciblée sur demande")
+    LOG.info("Smart Docan BMS 0.1.8-dev — parc dynamique et résumés MQTT")
     wanted = parse_addresses(settings.get("addresses", ""))
     slots = SlotAssignments(Path("/data/slots.json"), settings)
     if not settings.get("auto_discover", True) and not wanted and not slots.configured():
         LOG.warning("Aucun slot Bluetooth n'est configuré, découverte automatique désactivée")
     for slot, address in slots.configured():
-        LOG.info("Emplacement réservé : batterie %d", slot)
+        LOG.info("Emplacement actif : batterie %d", slot)
+    for slot, address in slots.disabled():
+        LOG.info("Emplacement désactivé : batterie %d (association conservée)", slot)
     polling = int(settings["poll_seconds"])
     store = Store(poll_seconds=polling)
     for slot, address in slots.configured():
@@ -530,6 +535,13 @@ async def run() -> None:
                     next_scan = min(next_scan, time.monotonic() + 2)
 
             if bridge is not None:
+                # Previously discovered MQTT entities must not remain online if
+                # their slot was explicitly disabled. Do not delete unique IDs.
+                for disabled_slot, _ in slots.disabled():
+                    bridge.publish(
+                        f"{PREFIX}/{slot_device_id(disabled_slot)}/availability",
+                        "offline",
+                    )
                 snapshot = store.snapshot()
                 # Publish offline availability even for currently missing assigned slots.
                 for rec in snapshot["batteries"]:
