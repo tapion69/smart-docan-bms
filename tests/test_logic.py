@@ -51,6 +51,78 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(out["temperature"], 17.15)
         self.assertEqual(out["delta_cell_voltage"], 0.002)
 
+    def test_auto_aggregate_for_one_to_four_configured_batteries(self):
+        for n in range(1, 5):
+            records = [
+                {"slot": i, "online": True, "data": {
+                    "battery_level": 50, "voltage": 52.5,
+                    "current": -2, "power": -105,
+                    "stored_energy_wh": 9000, "design_capacity": 300,
+                }} for i in range(1, n + 1)
+            ]
+            g = aggregate(records, len(records))
+            self.assertTrue(g["complete"])
+            self.assertEqual(g["expected_count"], n)
+            self.assertEqual(g["online_count"], n)
+            self.assertEqual(g["active_slots"], ",".join(map(str, range(1, n + 1))))
+            self.assertEqual(g["power"], -105 * n)
+            self.assertEqual(g["stored_energy_wh"], 9000 * n)
+            self.assertEqual(g["battery_level"], 50)
+
+    def test_offline_slot_remains_in_expected_count_and_hides_totals(self):
+        records = [
+            {"slot": i, "online": i != 2,
+             "data": {"battery_level": 50, "current": -1, "power": -52}}
+            for i in (1, 2, 4)
+        ]
+        g = aggregate(records, 3)
+        self.assertEqual(g["active_slots"], "1,2,4")
+        self.assertEqual(g["online_count"], 2)
+        self.assertEqual(g["expected_count"], 3)
+        self.assertFalse(g["complete"])
+        self.assertNotIn("power", g)
+        self.assertNotIn("battery_level", g)
+
+    def test_disabled_slot_not_auto_assigned_and_reenable_preserves_address(self):
+        a, b, c, d = (
+            "AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02",
+            "AA:BB:CC:DD:EE:03", "AA:BB:CC:DD:EE:04",
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "slots.json"
+            assignment = SlotAssignments(path, {})
+            assignment.bind_discovered([a, b, c, d])
+            three = SlotAssignments(path, {"slot_4_enabled": False})
+            self.assertEqual([i for i, _ in three.configured()], [1, 2, 3])
+            self.assertEqual(three.disabled(), [(4, d)])
+            self.assertIsNone(three.slot_for(d))
+            self.assertEqual(three.bind_discovered([a, b, c, d]), {a: 1, b: 2, c: 3})
+            self.assertEqual(three.slots[4], d)
+            again = SlotAssignments(path, {"slot_4_enabled": True})
+            self.assertEqual(again.slot_for(d), 4)
+
+    def test_auto_discovery_respects_disabled_empty_slot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            slots = SlotAssignments(Path(folder) / "slots.json", {"slot_2_enabled": False})
+            a, b = "AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"
+            self.assertEqual(slots.bind_discovered([a, b]), {a: 1, b: 3})
+            self.assertEqual([i for i, _ in slots.configured()], [1, 3])
+
+    def test_new_global_discovery_counters_not_masked_when_partial(self):
+        for key in ("online_count", "expected_count", "active_slots"):
+            _, config = global_discovery(key)
+            self.assertEqual(config["availability_topic"],
+                             "smart_docan_bms/global/availability")
+            self.assertEqual(config["unique_id"], f"smart_docan_bms_global_{key}")
+        for key in ("battery_level", "current", "power", "stored_energy_wh"):
+            _, config = global_discovery(key)
+            self.assertEqual(config["availability_topic"],
+                             "smart_docan_bms/global/measurements_availability")
+        self.assertEqual(
+            global_discovery("battery_level")[1]["unique_id"],
+            "smart_docan_bms_global_soc",
+        )
+
     def test_parallel_weighted_aggregate(self):
         sample1 = {"battery_level": 40, "design_capacity": 200, "voltage": 52, "current": -4, "power": -208}
         sample2 = {"battery_level": 20, "design_capacity": 300, "voltage": 52.4, "current": -6, "power": -314.4}
