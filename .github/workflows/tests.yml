@@ -45,6 +45,8 @@ jobs:
           assert config["options"]["mqtt_mode"] == "auto"
           assert config["schema"]["mqtt_password"] == "password"
           assert config["schema"]["poll_seconds"] == "int(5,300)"
+          assert all(config["options"][f"slot_{i}_enabled"] is True for i in range(1, 5))
+          assert all(config["schema"][f"slot_{i}_enabled"] == "bool" for i in range(1, 5))
           assert config["schema"]["missing_rescan_seconds"] == "int(15,180)"
           assert config["options"]["recover_stale_connections"] is False
           assert config["schema"]["stale_connection_after_seconds"] == "int(60,1800)"

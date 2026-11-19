@@ -67,6 +67,8 @@ GLOBAL_FIELDS = (
     ("stored_energy_wh", "Énergie stockée estimée", "Wh", "energy"),
     ("voltage_spread", "Écart tensions batteries", "V", "voltage"),
     ("online_count", "Batteries en ligne", None, None),
+    ("expected_count", "Batteries configurées", None, None),
+    ("active_slots", "Emplacements actifs", None, None),
 )
 
 
@@ -87,7 +89,14 @@ def global_discovery(key: str) -> tuple[str, dict]:
         },
         "state_topic": "smart_docan_bms/global/state",
         "value_template": "{{ value_json.get('" + key + "') }}",
-        "availability_topic": "smart_docan_bms/global/availability",
+        # The online/expected counts and slot list must remain available even
+        # when a single pack is disconnected. Only aggregate measurements need
+        # all active BMS to report successfully.
+        "availability_topic": (
+            "smart_docan_bms/global/availability"
+            if key in ("online_count", "expected_count", "active_slots")
+            else "smart_docan_bms/global/measurements_availability"
+        ),
         "payload_available": "online",
         "payload_not_available": "offline",
     }

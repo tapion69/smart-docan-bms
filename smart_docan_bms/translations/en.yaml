@@ -5,18 +5,28 @@ configuration:
   migrate_legacy_entities:
     name: Migrate old MAC-based MQTT entities
     description: Remove retained legacy MQTT discovery configs after the new fixed IDs are published
+  slot_1_enabled:
+    name: Enable battery 1
+    description: Disabling excludes this slot from fleet counts while preserving the saved address
   slot_1_address:
     name: Battery 1 - Bluetooth address (optional)
   slot_1_name:
     name: Battery 1 - name
+  slot_2_enabled:
+    name: Enable battery 2
   slot_2_address:
     name: Battery 2 - Bluetooth address (optional)
   slot_2_name:
     name: Battery 2 - name
+  slot_3_enabled:
+    name: Enable battery 3
   slot_3_address:
     name: Battery 3 - Bluetooth address (optional)
   slot_3_name:
     name: Battery 3 - name
+  slot_4_enabled:
+    name: Enable battery 4
+    description: Disable for a three-pack installation that formerly used four slots
   slot_4_address:
     name: Battery 4 - Bluetooth address (optional)
   slot_4_name:

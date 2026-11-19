@@ -44,6 +44,12 @@ class SlotAssignments:
     def __init__(self, path: str | Path, options: dict):
         self.path = Path(path)
         self.strict = bool(options.get("strict_slots", False))
+        # Disabled slots stay in persistent slots.json but are excluded from
+        # polling and fleet totals; re-enable without losing the BLE identity.
+        self.enabled = {
+            i: bool(options.get(f"slot_{i}_enabled", True))
+            for i in range(1, MAX_SLOTS + 1)
+        }
         self.names = {
             i: str(options.get(f"slot_{i}_name") or f"Batterie {i}").strip()[:64]
             for i in range(1, MAX_SLOTS + 1)
@@ -92,7 +98,10 @@ class SlotAssignments:
 
     def slot_for(self, address: str) -> int | None:
         address = clean_mac(address)
-        return next((i for i, mac in self.slots.items() if mac == address), None)
+        return next(
+            (i for i, mac in self.slots.items()
+             if mac == address and self.enabled[i]), None
+        )
 
     def bind_discovered(self, addresses: list[str] | set[str]) -> dict[str, int]:
         """Assign previously unseen devices only to unused slots, never shuffle."""
@@ -101,7 +110,10 @@ class SlotAssignments:
             for address in normalized:
                 if address in self.slots.values():
                     continue
-                free = next((i for i in range(1, MAX_SLOTS + 1) if i not in self.slots), None)
+                free = next(
+                    (i for i in range(1, MAX_SLOTS + 1)
+                     if self.enabled[i] and i not in self.slots), None
+                )
                 if free is None:
                     break
                 self.slots[free] = address
@@ -116,4 +128,9 @@ class SlotAssignments:
         return self.names[slot]
 
     def configured(self) -> list[tuple[int, str]]:
-        return sorted(self.slots.items())
+        """Active known slots; offline BMS remain part of the expected fleet."""
+        return sorted((i, mac) for i, mac in self.slots.items() if self.enabled[i])
+
+    def disabled(self) -> list[tuple[int, str]]:
+        """Retained slots disabled by the user (never erased automatically)."""
+        return sorted((i, mac) for i, mac in self.slots.items() if not self.enabled[i])
