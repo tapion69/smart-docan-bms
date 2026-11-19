@@ -177,7 +177,18 @@ def aggregate(records: list[dict], expected: int) -> dict:
     """
     valid = [r for r in records if r.get("online") and r.get("data")]
     count = len(valid)
-    result = {"online_count": count, "expected_count": expected, "complete": bool(expected) and count == expected}
+    # The total uses every *configured active slot*, not a fixed pack count.
+    # A temporarily disconnected BMS stays in the expected count; it is not
+    # silently dropped from the total.
+    active_slots = sorted(
+        {int(rec["slot"]) for rec in records if rec.get("slot") is not None}
+    )
+    result = {
+        "online_count": count,
+        "expected_count": expected,
+        "active_slots": ",".join(map(str, active_slots)),
+        "complete": bool(expected) and count == expected,
+    }
     if not result["complete"]:
         return result
     values = [r["data"] for r in valid]
