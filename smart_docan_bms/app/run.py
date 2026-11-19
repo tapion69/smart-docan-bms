@@ -88,7 +88,9 @@ class Store:
         self.last_cycle_period_seconds = None
         self._last_cycle_started_monotonic = None
         self.batteries: dict[str, dict] = {}
-        self.aggregate: dict = {}
+        # Publish explicit "0 configured" until first DWF discovery instead
+        # of leaving the global MQTT device in an undefined startup state.
+        self.aggregate: dict = aggregate([], 0)
         self.mqtt_connected = False
         self.mqtt_target = "Indéterminé"
         self.mqtt_error = "Connexion en attente"
