@@ -39,7 +39,11 @@ try:
         if not message.payload:
             received.append((message.topic, None))  # retained legacy config deletion
         else:
-            received.append((message.topic, json.loads(message.payload)))
+            try:
+                payload = json.loads(message.payload)
+            except json.JSONDecodeError:
+                payload = message.payload.decode()
+            received.append((message.topic, payload))
         arrived.set()
 
     subscriber = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
@@ -47,6 +51,7 @@ try:
     subscriber.on_message = on_message
     subscriber.connect("127.0.0.1", 18884, keepalive=30)
     subscriber.subscribe("homeassistant/#")
+    subscriber.subscribe("smart_docan_bms/global/#")
     subscriber.loop_start()
     try:
         bridge.battery({
@@ -55,7 +60,8 @@ try:
             "info": {}, "online": True,
         })
         bridge.summary({"complete": True, "voltage": 53.2, "battery_level": 42,
-                        "current": 0, "power": 0, "online_count": 1})
+                        "current": 0, "power": 0, "online_count": 1,
+                        "expected_count": 1, "active_slots": "1"})
         assert arrived.wait(10), "MQTT Discovery config was not received"
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
@@ -74,7 +80,39 @@ try:
                    for item in configs), "Fixed global MQTT Discovery not received"
         assert any(topic == "homeassistant/sensor/docan_aabbccddeeff_voltage/config"
                    and data is None for topic, data in received), "Retained legacy cleanup not published"
-        print("Manual MQTT auth + fixed slot/global Discovery + MAC migration: PASS")
+        assert any(item.get("unique_id") == "smart_docan_bms_global_expected_count"
+                   for item in configs), "Expected count discovery missing"
+        assert any(item.get("unique_id") == "smart_docan_bms_global_active_slots"
+                   for item in configs), "Active slot discovery missing"
+
+        # A disconnected BMS must suppress only aggregate values while
+        # preserving the fleet count/slot status on MQTT.
+        bridge.summary({"complete": False, "online_count": 2,
+                        "expected_count": 3, "active_slots": "1,2,3"})
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            if all(any(topic == topic_name and data == target for topic, data in received)
+                   for topic_name, target in (
+                       ("smart_docan_bms/global/measurements_availability", "offline"),
+                       ("smart_docan_bms/global/availability", "online"),
+                   )) and any(
+                       topic == "smart_docan_bms/global/state"
+                       and isinstance(data, dict)
+                       and data.get("expected_count") == 3
+                       and data.get("online_count") == 2
+                       and data.get("active_slots") == "1,2,3"
+                       for topic, data in received
+                   ):
+                break
+            time.sleep(0.1)
+        assert any(topic == "smart_docan_bms/global/measurements_availability"
+                   and data == "offline" for topic, data in received), (
+            "Partial-fleet measurements were not masked"
+        )
+        assert any(topic == "smart_docan_bms/global/state" and isinstance(data, dict)
+                   and data.get("online_count") == 2 and data.get("expected_count") == 3
+                   for topic, data in received), "Offline fleet counts were not published"
+        print("Manual MQTT auth + fixed Discovery + dynamic fleet counts + missing-pack safety: PASS")
     finally:
         subscriber.disconnect()
         subscriber.loop_stop()
