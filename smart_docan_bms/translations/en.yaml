@@ -4,7 +4,7 @@ configuration:
     description: On = listen to the BMS Master bus without transmitting RS485 requests. Off = previous active polling mode. Master telemetry may not be available if not transmitted.
   transport:
     name: Communication transport
-    description: bluetooth = existing behaviour ; serial = experimental Daren RS485 read-only driver
+    description: bluetooth = usual operation ; serial = RS485 reader ; dual = BLE MQTT readings plus receive-only RS485 cell-pattern comparison (no serial queries)
   serial_port:
     name: Serial device path (user supplied)
     description: Empty by default; enter the USB-RS485 device's own /dev/serial/by-id/... path
