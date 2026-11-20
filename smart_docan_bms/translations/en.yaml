@@ -7,10 +7,10 @@ configuration:
     description: Empty by default; enter the USB-RS485 device's own /dev/serial/by-id/... path
   serial_baudrate:
     name: Serial baud rate
-    description: 19200 for documented Daren DR-1363, or 9600 if needed
+    description: 9600 default for confirmed Docan batteries; 19200 for other Daren BMS
   serial_addresses:
     name: Serial BMS bus addresses (optional)
-    description: Blank probes 1 to 4; otherwise provide a comma separated list such as 1,2,3
+    description: Blank probes master Pack0 and addresses 1 to 4; use e.g. 0,1,2,3 (0 to 15)
   serial_slot_1_address:
     name: Battery 1 - RS485 bus address (optional)
   serial_slot_2_address:
