@@ -32,7 +32,62 @@ Les capteurs MQTT de tension utilisent `suggested_display_precision` et des mod�
 
 Le dashboard HTML prévu ultérieurement sera développé **séparément** dans Home Assistant et réutilisera les entités fixes MQTT, sans serveur web dans l'add-on.
 
-## Lecture Serial RS485 expérimentale (0.1.15-dev)
+## Lecture Serial RS485 expérimentale (0.1.16-dev)
+
+### Mode DUAL — comparer le Bluetooth aux réponses RS485 passives
+
+Ce mode sert aux installations où un **BMS Master** interroge déjà le bus
+RS485 : notre adaptateur USB ne doit pas devenir un deuxième maître.
+L'application garde les valeurs Bluetooth dans Home Assistant tout en
+étudiant le protocole RS485 en parallèle.
+
+Configuration :
+
+
+```yaml
+transport: dual
+serial_port: ""
+serial_baudrate: 9600
+serial_addresses: ""
+```
+
+
+Le **port reste vide par défaut**, à renseigner par chaque utilisateur.
+L'option `serial_passive` n'a aucun effet en mode `dual` :
+**le RS485 est toujours en réception seule**, aucune requête ni
+modification de paramètre n'est envoyée. Le Bluetooth continue ses
+cycles normaux et demeure **la seule source MQTT** du dashboard.
+Les associations sauvegardées dans `/data/slots.json` ne changent pas,
+et les observations RS485 n'écrivent pas dans `serial_slots.json`.
+
+Toutes les ~30 secondes, le journal comporte :
+
+- `Dual RS485/BLE (~30 s)` : nombre de trames reçues, références
+  Bluetooth récentes (moins de 180 s) et adresses RS485 observées.
+- `Dual diagnostic` : recherche d'un tableau de 16 tensions
+  de cellules dans chaque réponse de 98 octets, sur plusieurs offsets,
+  dans les deux ordres d'octets, avec contrôle de plausibilité.
+- Si un motif est proche : candidat Bluetooth, décalage des cellules,
+  ordre d'octets, erreur moyenne et maximale en millivolts, et
+  décalages possibles du SOC et de la tension du pack.
+- Si les profils se ressemblent trop, le résultat est **AMBIGU** :
+  aucune correspondance n'est imposée par ordre ou par numéro.
+- Après deux comparaisons concordantes : **correspondance PROBABLE**,
+  jamais enregistrée ni automatiquement attribuée à un pack MQTT.
+
+Ces correspondances restent des **hypothèses** tant que le contenu
+du protocole v23/85 n'est pas confirmé par recoupement indépendant.
+Des cellules presque parfaitement équilibrées peuvent présenter
+des signatures quasiment identiques entre différents packs.
+
+Les 98 octets restent uniquement en mémoire le temps du diagnostic :
+pas de sauvegarde des trames brutes, ni d'export, ni de publication MQTT
+RS485 non confirmée. Si aucune séquence de cellules n'est reconnue,
+le journal le précise sans fabriquer des mesures.
+
+Pour revenir au mode habituel : `transport: bluetooth`.
+Les anciens modes `serial` et `serial_passive` restent disponibles.
+
 
 ### Réponses v23/4A85 en écoute passive (pilote expérimental)
 

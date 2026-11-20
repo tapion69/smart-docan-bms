@@ -503,14 +503,18 @@ class PassiveSerialMonitor:
             bytesize=8, parity="N", stopbits=1,
         )
 
-    def read_window(self, seconds: float = 4.0) -> tuple[dict[int, dict], dict[str, int]]:
+    def read_window(self, seconds: float = 4.0, capture_v23: bool = False) -> tuple[dict[int, dict], dict]:
         if self._port is None:
             raise RuntimeError("Port d'écoute passive non ouvert")
         deadline = time.monotonic() + max(0.01, min(float(seconds), 15.0))
         records: dict[int, dict] = {}
         stats = {"bytes": 0, "frames": 0, "responses": 0,
                  "other_frames": 0, "rejected": 0, "signatures": {},
-                 "layouts": {}, "reject_reasons": {}}
+                 "layouts": {}, "reject_reasons": {},
+                 # Retain only latest validated DATAI per address in memory
+                 # for the opt-in Bluetooth comparison task. NEVER log, persist
+                 # or MQTT-publish these undecoded bytes.
+                 "probe_payloads": {}}
         while time.monotonic() < deadline:
             chunk = self._port.read_until(b"\r", size=512)
             if not chunk:
@@ -526,6 +530,22 @@ class PassiveSerialMonitor:
                 if address is None:
                     stats["other_frames"] += 1
                     continue
+                if capture_v23 and frame[1:3].upper() == b"23":
+                    # This extraction checks integrity before providing an
+                    # opaque 98-byte payload to the diagnostic matcher.
+                    # The matcher must not treat it as an already-decoded BMS.
+                    try:
+                        line = frame.decode("ascii")
+                        core, crc = line[1:-5], line[-5:-1]
+                        if (line.startswith("~") and line.endswith("\r")
+                                and ASCII_HEX.fullmatch(core)
+                                and ASCII_HEX.fullmatch(crc)
+                                and checksum(core) == int(crc, 16)
+                                and length_checksum(len(core)-12) == int(core[8:12], 16)
+                                and len(core[12:]) == 196):
+                            stats["probe_payloads"][address] = bytes.fromhex(core[12:])
+                    except (UnicodeError, ValueError, IndexError):
+                        pass
                 try:
                     decoded_address, sample, layout = decode_passive_response(frame)
                 except DarenSerialError as exc:
