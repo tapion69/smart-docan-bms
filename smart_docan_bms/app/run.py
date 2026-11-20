@@ -56,6 +56,7 @@ def load_options() -> dict:
     defaults = {
         "transport": "bluetooth",
         "serial_port": "",
+        "serial_passive": False,
         "serial_baudrate": 19200,
         "serial_addresses": "",
         "auto_discover": True, "addresses": "", "names": "", "scan_seconds": 8,
@@ -627,7 +628,7 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.12-dev — alarmes RS485 fiables et lecture optimisée")
+    LOG.info("Smart Docan BMS 0.1.13-dev — réception RS485 passive sans polling")
     transport = str(settings.get("transport", "bluetooth")).strip().lower()
     if transport == "serial":
         await run_serial(settings)
