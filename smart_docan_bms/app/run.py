@@ -310,7 +310,7 @@ async def run_serial(settings: dict) -> None:
     """
     polling = int(settings["poll_seconds"])
     port = str(settings.get("serial_port") or "").strip()
-    baudrate = int(settings.get("serial_baudrate", 19200))
+    baudrate = int(settings.get("serial_baudrate", 9600))
     address_list = parse_serial_addresses(settings.get("serial_addresses", ""))
     serial_slots = SerialSlots(Path("/data/serial_slots.json"), settings)
     store = Store(poll_seconds=polling)
@@ -422,7 +422,7 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.10-dev — diagnostics RS485 et trames multi-réponses")
+    LOG.info("Smart Docan BMS 0.1.11-dev — PACK0 master RS485 et 9600 bauds")
     transport = str(settings.get("transport", "bluetooth")).strip().lower()
     if transport == "serial":
         await run_serial(settings)
