@@ -1,4 +1,7 @@
 configuration:
+  serial_passive:
+    name: Serial — écoute passive sans polling
+    description: Activé = écoute le bus du BMS Master, sans envoyer aucune requête RS485 ; désactivé = interrogation active comme auparavant. La Master doit émettre des trames lisibles pour que ses mesures remontent.
   transport:
     name: Mode de communication
     description: bluetooth = fonctionnement habituel ; serial = lecture filaire RS485 Daren (pilote expérimental)
