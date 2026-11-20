@@ -4,7 +4,7 @@ configuration:
     description: Activé = écoute le bus du BMS Master, sans envoyer aucune requête RS485 ; désactivé = interrogation active comme auparavant. La Master doit émettre des trames lisibles pour que ses mesures remontent.
   transport:
     name: Mode de communication
-    description: bluetooth = fonctionnement habituel ; serial = lecture filaire RS485 Daren (pilote expérimental)
+    description: bluetooth = normal ; serial = lecture filaire RS485 ; dual = Bluetooth pour MQTT + écoute passive RS485 pour comparer les cellules (aucune commande série)
   serial_port:
     name: Serial - chemin du port (à renseigner)
     description: Vide par défaut ; saisir soi-même /dev/serial/by-id/... du convertisseur USB-RS485
