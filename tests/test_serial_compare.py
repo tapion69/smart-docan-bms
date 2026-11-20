@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "smart_docan_bms" /
 
 from serial_compare import (
     ble_cell_profiles, cell_windows, scalar_offsets, compare_payloads,
-    summarize_finding,
+    summarize_finding, minimum_cell, possible_soc_fields, shared_soc_hypotheses,
 )
 from daren_serial import PassiveSerialMonitor, checksum, length_checksum
 
@@ -102,6 +102,78 @@ class DualSerialCompareTests(unittest.TestCase):
         self.assertIn(8, row["soc_offsets"])
         self.assertIn(12, row["pack_voltage_offsets"])
         self.assertIn("candidat BLE batterie 3", summarize_finding(row))
+
+    def test_lowest_cell_index_breaks_close_voltage_signatures(self):
+        # Both packs are at 38% SOC and have almost identical voltages,
+        # but their lowest-cell indices are clearly distinct.
+        a = [3.280] * 16
+        b = [3.280] * 16
+        a[2] = 3.268  # BLE cell #3
+        b[11] = 3.268  # BLE cell #12
+        self.assertEqual(minimum_cell(a), (3, 12.0, True))
+        self.assertEqual(minimum_cell(b), (12, 12.0, True))
+        refs = ble_cell_profiles([
+            self.ble_record(2, tuple(a), soc=38),
+            self.ble_record(4, tuple(b), soc=38),
+        ])
+        result = compare_payloads({
+            1: self.pack_payload(tuple(a), offset=25, soc=38),
+            2: self.pack_payload(tuple(b), offset=25, soc=38),
+        }, refs)
+        self.assertEqual([x["status"] for x in result], ["candidate", "candidate"])
+        self.assertEqual([x["ble_slot"] for x in result], [2, 4])
+        self.assertEqual(result[0]["rs_min_cell"], 3)
+        self.assertEqual(result[1]["rs_min_cell"], 12)
+        self.assertIn("cellule minimale RS485 n°3", summarize_finding(result[0]))
+
+    def test_tied_lowest_cells_must_not_create_false_identity(self):
+        cells = [3.280] * 16
+        cells[1] = 3.270
+        cells[2] = 3.271  # indistinguishable within 1mV
+        self.assertFalse(minimum_cell(tuple(cells))[2])
+        refs = ble_cell_profiles([
+            self.ble_record(1, tuple(cells), soc=38),
+            self.ble_record(3, tuple(cells), soc=38),
+        ])
+        result = compare_payloads({
+            1: self.pack_payload(tuple(cells), offset=25, soc=38),
+        }, refs)
+        self.assertEqual(result[0]["status"], "ambiguous")
+        self.assertIn("indeterminate", summarize_finding(result[0]))
+
+    def test_cross_address_soc_field_breaks_same_cell_signature(self):
+        # A 33% pack and a 42% pack have matching cell vectors. The RS485
+        # SOC position must be shared across both addresses, not guessed
+        # individually at whichever byte coincidentally resembles their SOC.
+        cells = self.pattern_a()
+        refs = ble_cell_profiles([
+            self.ble_record(1, cells, soc=33),
+            self.ble_record(4, cells, soc=42),
+        ])
+        raw33 = self.pack_payload(cells, offset=30, soc=33)
+        raw42 = self.pack_payload(cells, offset=30, soc=42)
+        first = compare_payloads({2: raw42, 3: raw33}, refs)
+        self.assertEqual([x["status"] for x in first], ["candidate", "candidate"])
+        self.assertEqual([x["ble_slot"] for x in first], [4, 1])
+        self.assertEqual([x["soc_status"] for x in first], ["match", "match"])
+        self.assertEqual(
+            [x["soc_schema"] for x in first],
+            ["octet 8 u16_big_div100", "octet 8 u16_big_div100"],
+        )
+        self.assertIn("SOC RS485 octet 8", summarize_finding(first[0]))
+
+    def test_soc_only_same_group_cannot_claim_offset_as_confirmed(self):
+        cells = self.pattern_a()
+        refs = ble_cell_profiles([
+            self.ble_record(1, cells, soc=38),
+            self.ble_record(3, cells, soc=38),
+        ])
+        findings = compare_payloads({
+            1: self.pack_payload(cells, soc=38),
+            2: self.pack_payload(cells, soc=38),
+        }, refs)
+        self.assertTrue(all(x["status"] == "ambiguous" for x in findings))
+        self.assertTrue(all(x["soc_schema"] is None for x in findings))
 
     def test_identical_ble_cell_patterns_are_ambiguous(self):
         a = self.pattern_a()

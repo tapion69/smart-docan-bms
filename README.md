@@ -32,7 +32,42 @@ Les capteurs MQTT de tension utilisent `suggested_display_precision` et des mod�
 
 Le dashboard HTML prévu ultérieurement sera développé **séparément** dans Home Assistant et réutilisera les entités fixes MQTT, sans serveur web dans l'add-on.
 
-## Lecture Serial RS485 expérimentale (0.1.16-dev)
+## Lecture Serial RS485 expérimentale (0.1.17-dev)
+
+### Comparaison SOC + numéro de cellule minimale (0.1.17-dev)
+
+En `transport: dual`, la référence Bluetooth reste la seule source des
+capteurs MQTT. L'enquête RS485 passive est enrichie avec :
+
+- **Numéro de cellule minimale** de chacune des 16 cellules, côté BLE et
+  dans chaque motif RS485 décodé. Le numéro est compté de 1 à 16. On ne
+  retient le minimum comme indice discriminant que s'il est séparé de la
+  deuxième cellule la plus basse d'au moins **2 mV** sur les deux chemins,
+  pour limiter les permutations dues à l'équilibrage.
+- **SOC** : on recherche dans les trames RS485 les valeurs susceptibles
+  de correspondre aux SOC Bluetooth (formats u8 ou u16, deux endiannesses,
+  diviseurs 1, 10, 100). Une position SOC ne peut départager les batteries
+  que si la **même position et le même format** expliquent au moins deux
+  adresses RS485 et deux groupes de SOC différant d'au moins **3 points**,
+  sans hypothèse concurrente de même score. Cela reste une correspondance
+  expérimentale du protocole, pas une valeur de SOC certifiée.
+- Chaque ligne `Dual diagnostic` affiche les numéros de cellules minimales,
+  leur écart avec la cellule suivante, le SOC BLE et le degré de validation
+  du champ SOC RS485. **Aucune correspondance n'est enregistrée en cas
+  d'ambiguïté ou par simple ordre des batteries.**
+- Nouvelle ligne `Dual trafic Master RS485` : liste séparément les adresses
+  ciblées par les demandes `23/84` et celles des réponses `23/85`.
+  Une requête vers une adresse n'indique pas que cette batterie a répondu.
+  Une Master peut interroger les slaves sur RS485 puis publier son état global
+  sur CAN ; aucune réponse de télémétrie de la Master elle-même n'est
+  garantie sur le port écouté. Ne pas inventer ses mesures par élimination.
+
+Ce diagnostic nécessite seulement `transport: dual`,
+`serial_baudrate: 9600` et le `serial_port` de l'adaptateur. Aucun polling
+RS485 n'est envoyé en mode dual, les identifiants MQTT et le dashboard
+restent inchangés. Comparer les SOC/indices cellulaires sur plusieurs
+cycles avant de confirmer une adresse.
+
 
 ### Mode DUAL — comparer le Bluetooth aux réponses RS485 passives
 
