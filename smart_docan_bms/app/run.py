@@ -379,7 +379,7 @@ async def run_serial(settings: dict) -> None:
                         LOG.info(
                             "Batterie %d RS485 : SOC %s %% ; %s V ; %d cellules",
                             slot, data.get("battery_level"), data.get("voltage"),
-                            len([k for k in data if re.fullmatch(r"cell_\\d{2}", k)])
+                            len([k for k in data if re.fullmatch(r"cell_\d{2}", k)])
                         )
                         if bridge is not None:
                             bridge.battery(store.batteries[ident])
@@ -392,9 +392,9 @@ async def run_serial(settings: dict) -> None:
                                 bridge.battery(store.batteries[ident])
                         if failed[address] <= 2 or failed[address] % 10 == 0:
                             LOG.warning(
-                                "RS485 adresse %d : aucune télémétrie validée (%s). "
+                                "RS485 adresse %d : lecture impossible (%s : %s). "
                                 "Vérifier port, adresse, baudrate, A/B et protocole",
-                                address, type(exc).__name__,
+                                address, type(exc).__name__, str(exc)[:160],
                             )
 
             if bridge is not None:
