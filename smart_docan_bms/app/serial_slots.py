@@ -29,7 +29,7 @@ class SerialSlots:
             for k, v in saved["slots"].items():
                 slot = int(k)
                 address = int(v)
-                if not (1 <= slot <= 4 and 1 <= address <= 15):
+                if not (1 <= slot <= 4 and 0 <= address <= 15):
                     raise ValueError("Association RS485 enregistrée invalide")
                 self.mapping[slot] = address
 
