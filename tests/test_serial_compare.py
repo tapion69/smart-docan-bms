@@ -160,7 +160,7 @@ class DualSerialCompareTests(unittest.TestCase):
             [x["soc_schema"] for x in first],
             ["octet 8 u16_big_div100", "octet 8 u16_big_div100"],
         )
-        self.assertIn("SOC RS485 octet 8", summarize_finding(first[0]))
+        self.assertIn("SOC RS485 candidat 42.0 % octet 8", summarize_finding(first[0]))
 
     def test_one_soc_byte_is_not_three_independent_fields(self):
         cells = self.pattern_a()
