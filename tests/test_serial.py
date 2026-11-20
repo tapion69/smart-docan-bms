@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "smart_docan_bms" /
 from daren_serial import (
     DarenSerialError, decode_response, read_request, read_bms,
     parse_serial_addresses, validate_port, checksum, active_alarm_flags,
+    PassiveSerialMonitor,
 )
 from serial_slots import SerialSlots
 from logic import normalise_sample, aggregate
@@ -289,6 +290,103 @@ class SerialProtocolTests(unittest.TestCase):
         with patch.dict(sys.modules, {"serial": types.SimpleNamespace(Serial=FakeSerial)}):
             with self.assertRaisesRegex(DarenSerialError, "octets_non_ASCII=3"):
                 read_bms("/dev/ttyUSB123", 19200, 1, timeout=0.04)
+
+    @staticmethod
+    def sample_for_bus_address(address):
+        """Build a valid telemetry response for a given RS485 address."""
+        original = REFERENCE_FRAME[1:-5].decode("ascii")
+        addressed = original[:2] + f"{address:02X}" + original[4:]
+        return (
+            "~" + addressed + f"{checksum(addressed):04X}" + "\r"
+        ).encode("ascii")
+
+    def test_passive_mode_decodes_master_bus_replies_without_any_write(self):
+        frame1 = self.sample_for_bus_address(1)
+        frame2 = self.sample_for_bus_address(2)
+        frame3 = self.sample_for_bus_address(3)
+        chunks = [
+            b"noise\r",
+            read_request(1),  # a Master query: not telemetry
+            frame1[:25], frame1[25:],
+            read_request(2),
+            frame2 + frame3[:17],
+            frame3[17:],
+        ]
+        created = []
+
+        class ReadOnlyFakePort:
+            def __init__(self, *args, **kwargs):
+                self.messages = chunks.copy()
+                self.closed = False
+                created.append(self)
+            def read_until(self, end, size):
+                return self.messages.pop(0) if self.messages else b""
+            def write(self, *args):
+                raise AssertionError("Passive RS485 must never transmit")
+            def reset_input_buffer(self):
+                raise AssertionError("Passive RS485 must not discard master traffic")
+            def flush(self):
+                raise AssertionError("Passive RS485 must never flush writes")
+            def close(self):
+                self.closed = True
+
+        with patch.dict(sys.modules, {
+            "serial": types.SimpleNamespace(Serial=ReadOnlyFakePort)
+        }):
+            monitor = PassiveSerialMonitor("/dev/ttyUSB123", 9600)
+            monitor.open()
+            records, stats = monitor.read_window(0.05)
+            monitor.close()
+        self.assertEqual(set(records), {1, 2, 3})
+        self.assertEqual([records[i]["battery_level"] for i in (1, 2, 3)],
+                         [67.0, 67.0, 67.0])
+        self.assertEqual(stats["responses"], 3)
+        self.assertGreaterEqual(stats["other_frames"], 1)
+        self.assertTrue(created[0].closed)
+
+    def test_passive_master_commands_alone_do_not_invent_telemetry(self):
+        commands = [read_request(address) for address in (0, 1, 2, 3)]
+        class ReadOnlyFakePort:
+            def __init__(self, *args, **kwargs):
+                self.messages = commands.copy()
+            def read_until(self, end, size):
+                return self.messages.pop(0) if self.messages else b""
+            def close(self):
+                pass
+
+        with patch.dict(sys.modules, {
+            "serial": types.SimpleNamespace(Serial=ReadOnlyFakePort)
+        }):
+            monitor = PassiveSerialMonitor("/dev/ttyUSB123", 9600)
+            monitor.open()
+            records, stats = monitor.read_window(0.03)
+            monitor.close()
+        self.assertEqual(records, {})
+        self.assertEqual(stats["responses"], 0)
+        self.assertEqual(stats["other_frames"], 4)
+
+    def test_passive_rejects_incorrect_checksum_even_with_good_header(self):
+        bad = self.sample_for_bus_address(1)
+        bad = bad[:-5] + b"0000\r"
+        valid = self.sample_for_bus_address(2)
+        class ReadOnlyFakePort:
+            def __init__(self, *args, **kwargs):
+                self.messages = [bad, valid]
+            def read_until(self, end, size):
+                return self.messages.pop(0) if self.messages else b""
+            def close(self):
+                pass
+
+        with patch.dict(sys.modules, {
+            "serial": types.SimpleNamespace(Serial=ReadOnlyFakePort)
+        }):
+            monitor = PassiveSerialMonitor("/dev/ttyUSB123", 9600)
+            monitor.open()
+            records, stats = monitor.read_window(0.03)
+            monitor.close()
+        self.assertEqual(set(records), {2})
+        self.assertEqual(stats["rejected"], 1)
+        self.assertEqual(stats["responses"], 1)
 
     def test_persistent_serial_slots_separate_from_ble(self):
         with tempfile.TemporaryDirectory() as tmp:
