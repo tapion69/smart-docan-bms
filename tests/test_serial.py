@@ -19,6 +19,7 @@ from daren_serial import (
 )
 from serial_slots import SerialSlots
 from logic import normalise_sample, aggregate
+from discovery import battery_discovery
 
 # Documented 16S DR-JC03 19200-baud GetDeviceInfo response with checksum D582.
 REFERENCE_FRAME = (
@@ -122,7 +123,8 @@ class SerialProtocolTests(unittest.TestCase):
         # classify CURRENT bit 1 as a fault.
         raw_sample = decode_response(self.with_flags(current=0x0002), 1)
         self.assertFalse(raw_sample["problem"])
-        self.assertEqual(raw_sample["problem_code"], "0000/0002/0000/0000")
+        self.assertEqual(raw_sample["problem_code"], "0000/0000/0000/0000")
+        self.assertEqual(raw_sample["status_code_raw"], "0000/0002/0000/0000")
         normal = normalise_sample(raw_sample)
         self.assertFalse(normal["problem"])
         records = [{"slot": i, "online": True, "data": normal}
@@ -131,6 +133,14 @@ class SerialProtocolTests(unittest.TestCase):
         self.assertTrue(global_status["complete"])
         self.assertFalse(global_status["problem"])
         self.assertEqual(global_status["online_count"], 4)
+
+    def test_alarm_and_raw_status_both_have_stable_mqtt_entities(self):
+        alarm_topic, alarm = battery_discovery(1, "Batterie 1", "problem_code", {})
+        raw_topic, raw = battery_discovery(1, "Batterie 1", "status_code_raw", {})
+        self.assertEqual(alarm["unique_id"], "smart_docan_bms_battery_1_problem_code")
+        self.assertEqual(raw["unique_id"], "smart_docan_bms_battery_1_status_code_raw")
+        self.assertEqual(alarm_topic, "homeassistant/sensor/smart_docan_bms_battery_1_problem_code/config")
+        self.assertEqual(raw_topic, "homeassistant/sensor/smart_docan_bms_battery_1_status_code_raw/config")
 
     def test_real_protection_bits_still_trigger_alarm(self):
         for field, mask in (
