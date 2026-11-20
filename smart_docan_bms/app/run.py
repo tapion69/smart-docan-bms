@@ -312,6 +312,7 @@ async def run_serial(settings: dict) -> None:
     port = str(settings.get("serial_port") or "").strip()
     baudrate = int(settings.get("serial_baudrate", 9600))
     address_list = parse_serial_addresses(settings.get("serial_addresses", ""))
+    explicit_serial_addresses = bool(str(settings.get("serial_addresses") or "").strip())
     serial_slots = SerialSlots(Path("/data/serial_slots.json"), settings)
     store = Store(poll_seconds=polling)
     for slot, address in serial_slots.configured():
@@ -319,6 +320,7 @@ async def run_serial(settings: dict) -> None:
     bridge: MQTTBridge | None = None
     next_mqtt_attempt = 0.0
     failed: dict[int, int] = {}
+    discovery_complete_logged = False
     LOG.info(
         "Mode Serial RS485 (lecture seule) : vitesse %d, adresses à rechercher %s",
         baudrate, ",".join(map(str, address_list)),
@@ -349,9 +351,26 @@ async def run_serial(settings: dict) -> None:
                 next_mqtt_attempt = time.monotonic() + 60
 
             if port:
-                # Saved manual/automatic mappings may include addresses outside
-                # the default 1..4 probing range, so always include saved ids.
-                targets = sorted(set(address_list) | {a for _, a in serial_slots.configured()})
+                # Stop probing unassigned default addresses once every enabled
+                # logical slot is associated. This avoids querying absent
+                # PACK0 on a four-pack installation using only 1,2,3,4.
+                # Explicit serial_addresses always take precedence.
+                assigned = serial_slots.configured()
+                enabled_count = sum(bool(v) for v in serial_slots.enabled.values())
+                fully_assigned = bool(enabled_count) and len(assigned) == enabled_count
+                if fully_assigned and not explicit_serial_addresses:
+                    targets = sorted(address for _, address in assigned)
+                    if not discovery_complete_logged:
+                        LOG.info(
+                            "RS485 : %d/%d emplacements associés, recherche "
+                            "des autres adresses suspendue (adresses actives : %s)",
+                            len(assigned), enabled_count,
+                            ",".join(str(addr) for addr in targets),
+                        )
+                        discovery_complete_logged = True
+                else:
+                    # Include all saved BMS addresses even if outside 0..4.
+                    targets = sorted(set(address_list) | {addr for _, addr in assigned})
                 for address in targets:
                     slot = serial_slots.slot_for(address)
                     if slot is None and address in serial_slots.mapping.values():
@@ -422,7 +441,7 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.11-dev — PACK0 master RS485 et 9600 bauds")
+    LOG.info("Smart Docan BMS 0.1.12-dev — alarmes RS485 fiables et lecture optimisée")
     transport = str(settings.get("transport", "bluetooth")).strip().lower()
     if transport == "serial":
         await run_serial(settings)
