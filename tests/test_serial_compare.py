@@ -207,6 +207,9 @@ class DualSerialCompareTests(unittest.TestCase):
         self.assertEqual([r["soc_schema"] for r in result],
                          ["octet 6 u8"] * 3)
         self.assertEqual([r["soc_status"] for r in result], ["match"] * 3)
+        self.assertEqual([r["rs485_soc_candidate"] for r in result],
+                         [41.0, 38.0, 37.0])
+        self.assertIn("SOC RS485 candidat 41.0 %", summarize_finding(result[0]))
         self.assertNotIn(1, [r["ble_slot"] for r in result])
         self.assertTrue(all("cellule minimale" in summarize_finding(r)
                             for r in result))
