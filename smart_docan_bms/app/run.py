@@ -723,7 +723,7 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
                 total_telegrams += stats["frames"]
                 for signature, count in stats.get("signatures", {}).items():
                     header = re.fullmatch(
-                        r"v23-a([0-9A-F]{2})-c4A-k(84|85)-\\d+o-crcOK-lenOK",
+                        r"v23-a([0-9A-F]{2})-c4A-k(84|85)-\d+o-crcOK-lenOK",
                         signature,
                     )
                     if header:
