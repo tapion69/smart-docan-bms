@@ -704,6 +704,7 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
     # own telemetry. Track addressed requests and actual replies separately.
     master_requests: dict[int, int] = {}
     master_replies: dict[int, int] = {}
+    extra_services: dict[str, int] = {}
 
     LOG.info(
         "MODE DUAL BLE + RS485 PASSIF : Bluetooth = seule source MQTT ; "
@@ -723,16 +724,21 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
                 total_telegrams += stats["frames"]
                 for signature, count in stats.get("signatures", {}).items():
                     header = re.fullmatch(
-                        r"v23-a([0-9A-F]{2})-c4A-k(84|85)-\d+o-crcOK-lenOK",
+                        r"v23-a([0-9A-F]{2})-c4A-k([0-9A-F]{2})-\d+o-crcOK-lenOK",
                         signature,
                     )
                     if header:
                         address = int(header.group(1), 16)
-                        counter = (
-                            master_requests if header.group(2) == "84"
-                            else master_replies
-                        )
-                        counter[address] = counter.get(address, 0) + count
+                        service = header.group(2)
+                        if service in ("84", "85"):
+                            counter = (
+                                master_requests if service == "84"
+                                else master_replies
+                            )
+                            counter[address] = counter.get(address, 0) + count
+                        else:
+                            key = f"service {service} adresse {address}"
+                            extra_services[key] = extra_services.get(key, 0) + count
                 for addr, payload in stats["probe_payloads"].items():
                     if allowed is None or addr in allowed:
                         pending[addr] = (payload, now)
@@ -769,6 +775,16 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
                         "émettre ses propres mesures sur ce port",
                         requested_list, replied_list,
                     )
+                    if extra_services:
+                        detail = ", ".join(
+                            f"{key} x{count}" for key, count in sorted(
+                                extra_services.items(),
+                                key=lambda x: (-x[1], x[0]),
+                            )[:8]
+                        )
+                        LOG.info(
+                            "Dual autres services RS485 observés : %s", detail
+                        )
                     for finding in findings:
                         addr = finding["address"]
                         LOG.info("Dual diagnostic : %s", summarize_finding(finding))
@@ -797,6 +813,7 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
                     total_v23 = 0
                     master_requests.clear()
                     master_replies.clear()
+                    extra_services.clear()
                     previous_report = now
             except asyncio.CancelledError:
                 raise
