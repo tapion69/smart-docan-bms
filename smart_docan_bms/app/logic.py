@@ -35,6 +35,7 @@ FIELDS = {
     "runtime": ("Autonomie brute", "s", "duration", "measurement", "diagnostic", "sensor"),
     "runtime_text": ("Autonomie estimée", None, None, None, None, "sensor"),
     "problem_code": ("Code alarme", None, None, None, "diagnostic", "sensor"),
+    "status_code_raw": ("États BMS bruts RS485", None, None, None, "diagnostic", "sensor"),
     "balancer": ("Équilibrage actif", None, None, None, "diagnostic", "binary_sensor"),
     "battery_charging": ("En charge", None, None, None, None, "binary_sensor"),
     "chrg_mosfet": ("MOSFET charge", None, None, None, "diagnostic", "binary_sensor"),
