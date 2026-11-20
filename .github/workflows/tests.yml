@@ -19,7 +19,7 @@ jobs:
       - name: Build Home Assistant add-on Docker image
         run: docker build --pull -t smart-docan-bms:ci smart_docan_bms
       - name: Check runtime dependencies inside built image
-        run: docker run --rm --entrypoint python smart-docan-bms:ci -c "import aiobmsble, bleak, paho.mqtt.client, run, logic, discovery; from bleak_retry_connector import close_stale_connections_by_address; print('Headless Python and BlueZ recovery imports OK')"
+        run: docker run --rm --entrypoint python smart-docan-bms:ci -c "import aiobmsble, bleak, paho.mqtt.client, serial, run, logic, discovery, daren_serial, serial_slots; from bleak_retry_connector import close_stale_connections_by_address; print('Bluetooth/serial dependencies and modules OK')"
       - name: MQTT manual authentication and Discovery against real Mosquitto
         run: |
           mkdir -p .ci-mosquitto
@@ -41,6 +41,12 @@ jobs:
           with open("smart_docan_bms/config.yaml", encoding="utf-8") as stream:
               config = yaml.safe_load(stream)
           assert config["host_dbus"] is True
+          assert config["uart"] is True
+          assert config["options"]["transport"] == "bluetooth"
+          assert config["schema"]["transport"] == "list(bluetooth|serial)"
+          assert config["options"]["serial_port"] == ""
+          assert config["schema"]["serial_port"] == "str?"
+          assert config["schema"]["serial_baudrate"] == "int(9600,19200)"
           assert "mqtt:want" in config["services"]
           assert config["options"]["mqtt_mode"] == "auto"
           assert config["schema"]["mqtt_password"] == "password"
