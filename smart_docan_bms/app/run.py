@@ -700,6 +700,10 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
     previous_report = time.monotonic() - 30
     total_telegrams = 0
     total_v23 = 0
+    # Presence of bus requests does not prove that the Master broadcasts its
+    # own telemetry. Track addressed requests and actual replies separately.
+    master_requests: dict[int, int] = {}
+    master_replies: dict[int, int] = {}
 
     LOG.info(
         "MODE DUAL BLE + RS485 PASSIF : Bluetooth = seule source MQTT ; "
@@ -717,6 +721,18 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
                 _, stats = await asyncio.to_thread(monitor.read_window, 4.0, True)
                 now = time.monotonic()
                 total_telegrams += stats["frames"]
+                for signature, count in stats.get("signatures", {}).items():
+                    header = re.fullmatch(
+                        r"v23-a([0-9A-F]{2})-c4A-k(84|85)-\\d+o-crcOK-lenOK",
+                        signature,
+                    )
+                    if header:
+                        address = int(header.group(1), 16)
+                        counter = (
+                            master_requests if header.group(2) == "84"
+                            else master_replies
+                        )
+                        counter[address] = counter.get(address, 0) + count
                 for addr, payload in stats["probe_payloads"].items():
                     if allowed is None or addr in allowed:
                         pending[addr] = (payload, now)
@@ -740,6 +756,18 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
                         "v23/85 captées %d ; références BLE %d ; adresses "
                         "RS485 %d ; aucun polling RS485",
                         total_telegrams, total_v23, len(profiles), len(recent),
+                    )
+                    requested_list = ",".join(
+                        str(x) for x in sorted(master_requests)
+                    ) or "aucune"
+                    replied_list = ",".join(
+                        str(x) for x in sorted(master_replies)
+                    ) or "aucune"
+                    LOG.info(
+                        "Dual trafic Master RS485 : requêtes 23/84 vers %s ; "
+                        "réponses 23/85 de %s ; la Master peut ne pas "
+                        "émettre ses propres mesures sur ce port",
+                        requested_list, replied_list,
                     )
                     for finding in findings:
                         addr = finding["address"]
@@ -767,6 +795,8 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
                         )
                     total_telegrams = 0
                     total_v23 = 0
+                    master_requests.clear()
+                    master_replies.clear()
                     previous_report = now
             except asyncio.CancelledError:
                 raise
@@ -793,7 +823,7 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.16-dev — comparateur Bluetooth + RS485 passif")
+    LOG.info("Smart Docan BMS 0.1.17-dev — comparaison SOC et cellule minimale RS485/BLE")
     transport = str(settings.get("transport", "bluetooth")).strip().lower()
     if transport == "serial":
         await run_serial(settings)
