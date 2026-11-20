@@ -328,6 +328,7 @@ async def run_serial_passive(settings: dict) -> None:
     passive_totals = {k: 0 for k in ("bytes", "frames", "responses", "other_frames", "rejected")}
     passive_signatures: dict[str, int] = {}
     passive_layouts: dict[str, int] = {}
+    passive_reject_reasons: dict[str, int] = {}
     LOG.info(
         "RS485 ÉCOUTE PASSIVE : aucune requête série envoyée ; vitesse %d ; "
         "adresses reçues %s ; délai hors ligne %d s",
@@ -390,6 +391,8 @@ async def run_serial_passive(settings: dict) -> None:
                             passive_signatures[key] = passive_signatures.get(key, 0) + count
                         for key, count in stats.get("layouts", {}).items():
                             passive_layouts[key] = passive_layouts.get(key, 0) + count
+                        for key, count in stats.get("reject_reasons", {}).items():
+                            passive_reject_reasons[key] = passive_reject_reasons.get(key, 0) + count
                         for address, sample in sorted(records.items()):
                             if requested is not None and address not in requested:
                                 continue
@@ -482,9 +485,22 @@ async def run_serial_passive(settings: dict) -> None:
                                 "RS485 décodage passif validé : %s",
                                 layout_text,
                             )
+                            if passive_reject_reasons:
+                                errors = ", ".join(
+                                    f"{reason} x{count}"
+                                    for reason, count in sorted(
+                                        passive_reject_reasons.items(),
+                                        key=lambda item: (-item[1], item[0]),
+                                    )[:5]
+                                )
+                                LOG.info(
+                                    "RS485 diagnostics de décodage refusé : %s",
+                                    errors,
+                                )
                             passive_totals = {key: 0 for key in passive_totals}
                             passive_signatures.clear()
                             passive_layouts.clear()
+                            passive_reject_reasons.clear()
                             last_report = now
                     except Exception as exc:
                         LOG.warning(
