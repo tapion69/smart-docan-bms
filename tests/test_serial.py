@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "smart_docan_bms" /
 from daren_serial import (
     DarenSerialError, decode_response, read_request, read_bms,
     parse_serial_addresses, validate_port, checksum, active_alarm_flags,
-    PassiveSerialMonitor,
+    PassiveSerialMonitor, passive_frame_signature,
 )
 from serial_slots import SerialSlots
 from logic import normalise_sample, aggregate
@@ -300,6 +300,39 @@ class SerialProtocolTests(unittest.TestCase):
             "~" + addressed + f"{checksum(addressed):04X}" + "\r"
         ).encode("ascii")
 
+    def test_passive_diagnostic_only_exposes_protocol_headers_not_payload(self):
+        read = read_request(1)
+        self.assertEqual(
+            passive_frame_signature(read),
+            "v22-a01-c4A-k42-1o-crcOK-lenOK",
+        )
+        observed = passive_frame_signature(REFERENCE_FRAME)
+        self.assertEqual(
+            observed, "v22-a01-c4A-k00-99o-crcOK-lenOK",
+        )
+        self.assertNotIn("1A2C", observed)  # SOC 67% must not leak
+        self.assertNotIn("14C0", observed)  # Pack voltage must not leak
+        self.assertEqual(passive_frame_signature(bytes((128, 13))), "non_ASCII")
+        bad = REFERENCE_FRAME[:-5] + b"0000\r"
+        self.assertEqual(
+            passive_frame_signature(bad),
+            "v22-a01-c4A-k00-99o-crcKO-lenOK",
+        )
+
+    def test_passive_other_service_is_reported_as_header_without_decoding(self):
+        # The existing Master may use a different service than 42.
+        request = read_request(1).decode("ascii")
+        body = request[1:-5]
+        body = body[:6] + "43" + body[8:]
+        alt = ("~" + body + f"{checksum(body):04X}" + "\r").encode()
+        self.assertEqual(
+            passive_frame_signature(alt),
+            "v22-a01-c4A-k43-1o-crcOK-lenOK",
+        )
+        self.assertIsNone(
+            __import__("daren_serial")._passive_telemetry_address(alt)
+        )
+
     def test_passive_mode_decodes_master_bus_replies_without_any_write(self):
         frame1 = self.sample_for_bus_address(1)
         frame2 = self.sample_for_bus_address(2)
@@ -342,6 +375,8 @@ class SerialProtocolTests(unittest.TestCase):
                          [67.0, 67.0, 67.0])
         self.assertEqual(stats["responses"], 3)
         self.assertGreaterEqual(stats["other_frames"], 1)
+        self.assertEqual(stats["signatures"]["v22-a01-c4A-k00-99o-crcOK-lenOK"], 1)
+        self.assertEqual(stats["signatures"]["v22-a02-c4A-k42-1o-crcOK-lenOK"], 1)
         self.assertTrue(created[0].closed)
 
     def test_passive_master_commands_alone_do_not_invent_telemetry(self):
