@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "smart_docan_bms" /
 
 from daren_serial import (
     DarenSerialError, decode_response, read_request, read_bms,
-    parse_serial_addresses, validate_port,
+    parse_serial_addresses, validate_port, checksum,
 )
 from serial_slots import SerialSlots
 from logic import normalise_sample, aggregate
@@ -28,9 +28,59 @@ REFERENCE_FRAME = (
 class SerialProtocolTests(unittest.TestCase):
     def test_frame_only_read_command(self):
         self.assertEqual(read_request(1), b"~22014A42E00201FD28\r")
-        for address in (0, 16, -1):
+        self.assertEqual(read_request(0), b"~22004A42E00200FD2A\r")
+        for address in (16, -1):
             with self.assertRaises(ValueError):
                 read_request(address)
+
+    def test_docan_pack0_master_reference_frame_is_addressed_and_validated(self):
+        # Re-address the documented service-42 reply to PACK0; retain its
+        # telemetry but recompute checksum as a real address-zero reply would.
+        core = REFERENCE_FRAME[1:-5].decode("ascii")
+        master_core = core[:2] + "00" + core[4:]
+        master_reply = (
+            "~" + master_core + f"{checksum(master_core):04X}" + "\r"
+        ).encode("ascii")
+        data = decode_response(master_reply, 0)
+        self.assertEqual(data["battery_level"], 67.0)
+        self.assertEqual(len(data["cell_voltages"]), 16)
+        with self.assertRaisesRegex(DarenSerialError, "autre adresse"):
+            decode_response(master_reply, 1)
+
+    def test_existing_three_serial_slaves_keep_fixed_slots_when_master_detected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "serial_slots.json"
+            old = SerialSlots(path, {})
+            self.assertEqual(old.bind_detected(1), 1)
+            self.assertEqual(old.bind_detected(2), 2)
+            self.assertEqual(old.bind_detected(3), 3)
+
+            updated = SerialSlots(path, {})
+            self.assertEqual(updated.bind_detected(0), 4)
+            self.assertEqual(updated.slot_for(0), 4)
+            self.assertEqual(updated.configured(), [(1, 1), (2, 2), (3, 3), (4, 0)])
+
+            restart = SerialSlots(path, {})
+            self.assertEqual(restart.configured(), [(1, 1), (2, 2), (3, 3), (4, 0)])
+            self.assertEqual(restart.bind_detected(0), 4)
+
+            # The MQTT aggregate now counts the four parallel packs, not three.
+            sample = normalise_sample(decode_response(REFERENCE_FRAME, 1))
+            records = [
+                {"slot": slot, "online": True, "data": sample}
+                for slot, _ in restart.configured()
+            ]
+            total = aggregate(records, len(records))
+            self.assertTrue(total["complete"])
+            self.assertEqual(total["expected_count"], 4)
+            self.assertEqual(total["online_count"], 4)
+
+    def test_explicit_master_mapping_accepts_address_zero(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "serial_slots.json"
+            slots = SerialSlots(path, {"serial_slot_1_address": "0"})
+            self.assertEqual(slots.slot_for(0), 1)
+            self.assertEqual(SerialSlots(path, {}).slot_for(0), 1)
 
     def test_decode_real_documented_reference(self):
         sample = decode_response(REFERENCE_FRAME, 1)
@@ -63,9 +113,10 @@ class SerialProtocolTests(unittest.TestCase):
             decode_response(REFERENCE_FRAME[:-1], 1)
 
     def test_default_address_probing_and_user_supplied_device(self):
-        self.assertEqual(parse_serial_addresses(""), (1, 2, 3, 4))
+        self.assertEqual(parse_serial_addresses(""), (0, 1, 2, 3, 4))
         self.assertEqual(parse_serial_addresses("1, 3;5,3"), (1, 3, 5))
-        for x in ("0", "16", "1,99", "abc"):
+        self.assertEqual(parse_serial_addresses("0,3,1,0"), (0, 3, 1))
+        for x in ("-1", "16", "1,99", "abc"):
             with self.assertRaises(ValueError):
                 parse_serial_addresses(x)
         with self.assertRaises(ValueError):
