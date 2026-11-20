@@ -204,7 +204,11 @@ def decode_response(frame: bytes, expected_address: int) -> dict:
         "temp_values": [ambient, pack_temp, mos_temp] + cell_temps,
         "temp_sensors": 3 + cell_temp_count,
         "problem": any(validated_alarms),
-        "problem_code": f"{voltage_flags:04X}/{current_flags:04X}/{temp_flags:04X}/{warning_flags:04X}",
+        # problem_code is the already-known MQTT entity: actual alarm bits only.
+        # Keep the unmodified registers in a new diagnostic sensor so status
+        # information (including current bit 1) is never lost.
+        "problem_code": "/".join(f"{word:04X}" for word in validated_alarms),
+        "status_code_raw": f"{voltage_flags:04X}/{current_flags:04X}/{temp_flags:04X}/{warning_flags:04X}",
         "chrg_mosfet": bool(fet_flags & 1),
         "dischrg_mosfet": bool(fet_flags & 2),
         "battery_charging": current > 0.05,
