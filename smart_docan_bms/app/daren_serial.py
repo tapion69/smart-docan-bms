@@ -510,7 +510,7 @@ class PassiveSerialMonitor:
         records: dict[int, dict] = {}
         stats = {"bytes": 0, "frames": 0, "responses": 0,
                  "other_frames": 0, "rejected": 0, "signatures": {},
-                 "layouts": {}}
+                 "layouts": {}, "reject_reasons": {}}
         while time.monotonic() < deadline:
             chunk = self._port.read_until(b"\r", size=512)
             if not chunk:
@@ -528,8 +528,12 @@ class PassiveSerialMonitor:
                     continue
                 try:
                     decoded_address, sample, layout = decode_passive_response(frame)
-                except DarenSerialError:
+                except DarenSerialError as exc:
                     stats["rejected"] += 1
+                    # The exception is a fixed category, never a raw frame.
+                    reasons = stats["reject_reasons"]
+                    category = str(exc)[:90]
+                    reasons[category] = reasons.get(category, 0) + 1
                     continue
                 if decoded_address != address:
                     stats["rejected"] += 1
