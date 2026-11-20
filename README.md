@@ -32,7 +32,51 @@ Les capteurs MQTT de tension utilisent `suggested_display_precision` et des mod�
 
 Le dashboard HTML prévu ultérieurement sera développé **séparément** dans Home Assistant et réutilisera les entités fixes MQTT, sans serveur web dans l'add-on.
 
-## Lecture Serial RS485 expérimentale (0.1.14-dev)
+## Lecture Serial RS485 expérimentale (0.1.15-dev)
+
+### Réponses v23/4A85 en écoute passive (pilote expérimental)
+
+Le test réel Docan NOON sur bus RS485 **9600 bauds** a identifié des
+requêtes émises par le Master `v23/4A84` (un octet de données)
+et des réponses `v23/4A85` (**98 octets**) avec checksum
+et longueur valides. L'ancien lecteur n'acceptait que les
+réponses `v22/4A00` (**99 octets**) ; il rejetait donc
+toutes les réponses observées malgré la bonne réception du bus.
+
+Le nouveau lecteur **n'envoie toujours aucune commande RS485** en
+`serial_passive: true`. Il reconnaît les trames `23/85`, contrôle leur
+checksum et leur adresse, puis tente **deux dispositions hypothétiques**
+du contenu de 98 octets par rapport aux 99 octets du format ancien :
+
+- octet `DATAFLAG` absent en tête ;
+- octet final absent en queue.
+
+Une lecture n'est publiée sur MQTT que si **une seule disposition**
+produit un ensemble cohérent (SOC, tension, 8 à 32 cellules,
+**somme des tensions des cellules proche de celle du pack**, températures,
+courant et capacité plausibles). Toute réponse ambiguë ou incompatible
+est rejetée : **aucune mesure ne doit être inventée**.
+
+**Limite :** les correspondances exactes des champs `23/85` ne sont
+pas encore confirmées par une trame brute réelle ni une documentation
+constructeur décrivant cette variante. Les tests de format ont utilisé
+des trames de synthèse dérivées du format `22/00`. Les journaux
+compareront donc les dispositions validées ou expliqueront les rejets.
+Comparer les premières valeurs RS485 récupérées avec les mesures Bluetooth
+reste nécessaire avant d'utiliser ces capteurs pour des décisions critiques.
+
+Le journal affiche toutes les ~30 secondes :
+
+- `RS485 passif (~30 s)` : nombre de réponses valides ;
+- `RS485 décodage passif validé` : disposition retenue ;
+- `RS485 diagnostics de décodage refusé` : catégorie d'échec sans divulguer
+  le contenu brut du BMS.
+
+Il est possible qu'un Master ne transmette pas ses propres mesures sur le
+bus interrogé : un total incomplet reste indisponible et les anciens
+`unique_id` MQTT sont conservés.
+
+
 
 ### Diagnostic de protocole en écoute passive
 
