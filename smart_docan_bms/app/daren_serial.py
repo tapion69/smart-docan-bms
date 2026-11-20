@@ -15,7 +15,7 @@ import time
 
 ASCII_HEX = re.compile(r"^[0-9A-Fa-f]+$")
 SUPPORTED_BAUDS = {9600, 19200}
-DEFAULT_SCAN_IDS = (1, 2, 3, 4)
+DEFAULT_SCAN_IDS = (0, 1, 2, 3, 4)
 
 
 class DarenSerialError(ValueError):
@@ -32,14 +32,14 @@ def validate_port(path: str) -> str:
 
 
 def parse_serial_addresses(value: str) -> tuple[int, ...]:
-    """Blank means probe the first four bus addresses; never address 0/broadcast."""
+    """Blank probes Docan PACK0 (host) and PACK1..PACK4 (up to four slaves)."""
     if not str(value or "").strip():
         return DEFAULT_SCAN_IDS
     parts = [x for x in re.split(r"[,;\s]+", str(value).strip()) if x]
     ids: list[int] = []
     for text in parts:
-        if not text.isdigit() or not 1 <= int(text) <= 15:
-            raise ValueError("Adresses RS485 attendues : 1 à 15, séparées par virgule")
+        if not text.isdigit() or not 0 <= int(text) <= 15:
+            raise ValueError("Adresses RS485 attendues : 0 à 15, séparées par virgule")
         address = int(text)
         if address not in ids:
             ids.append(address)
@@ -59,8 +59,10 @@ def checksum(text: str) -> int:
 
 def read_request(address: int) -> bytes:
     """Only GetDeviceInfo 0x42. Explicitly no write commands."""
-    if not 1 <= address <= 15:
-        raise ValueError("Adresse RS485 invalide : 1 à 15")
+    if not 0 <= address <= 15:
+        raise ValueError("Adresse RS485 invalide : 0 à 15")
+    # Docan PACK0 (host) is a real device address in this battery family.
+    # This is a read-only DR-1363 command, not Modbus RTU broadcast.
     # The information field is the addressed battery's address as ASCII hex.
     prefix = f"22{address:02X}4A42{length_checksum(2):04X}{address:02X}"
     return f"~{prefix}{checksum(prefix):04X}\r".encode("ascii")
