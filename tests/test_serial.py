@@ -17,6 +17,7 @@ from daren_serial import (
     DarenSerialError, decode_response, read_request, read_bms,
     parse_serial_addresses, validate_port, checksum, active_alarm_flags,
     PassiveSerialMonitor, passive_frame_signature,
+    decode_passive_response, length_checksum,
 )
 from serial_slots import SerialSlots
 from logic import normalise_sample, aggregate
@@ -332,6 +333,92 @@ class SerialProtocolTests(unittest.TestCase):
         self.assertIsNone(
             __import__("daren_serial")._passive_telemetry_address(alt)
         )
+
+    @staticmethod
+    def v23_reply(address=1, payload=None):
+        """Synthetic 98-byte 23/85 frame derived from documented 99B sample.
+
+        This is an *offset regression fixture*, not evidence of the live
+        firmware layout. Live decoding remains subject to plausibility gates.
+        """
+        if payload is None:
+            payload = bytes.fromhex(REFERENCE_FRAME[13:-5].decode("ascii"))[1:]
+        core = (
+            f"23{address:02X}4A85{length_checksum(len(payload) * 2):04X}"
+            + payload.hex().upper()
+        )
+        return f"~{core}{checksum(core):04X}\r".encode("ascii")
+
+    def test_v23_85_two_possible_98byte_layouts_have_strict_validation(self):
+        raw99 = bytes.fromhex(REFERENCE_FRAME[13:-5].decode("ascii"))
+        self.assertEqual(len(raw99), 99)
+        for address, kind, payload in (
+            (1, "v23/85_sans_flag_initial", raw99[1:]),
+            (2, "v23/85_sans_octet_final", raw99[:-1]),
+        ):
+            with self.subTest(layout=kind):
+                frame = self.v23_reply(address, payload)
+                self.assertEqual(
+                    passive_frame_signature(frame),
+                    f"v23-a{address:02X}-c4A-k85-98o-crcOK-lenOK",
+                )
+                actual, sample, layout = decode_passive_response(frame)
+                self.assertEqual(actual, address)
+                self.assertEqual(layout, kind)
+                self.assertEqual(sample["battery_level"], 67.0)
+                self.assertAlmostEqual(sample["voltage"], sum(sample["cell_voltages"]), delta=0.75)
+                self.assertEqual(len(sample["cell_voltages"]), 16)
+
+    def test_v23_85_rejects_bad_crc_and_physically_wrong_voltage(self):
+        good = self.v23_reply(1)
+        with self.assertRaisesRegex(DarenSerialError, "Checksum"):
+            decode_passive_response(good[:-5] + b"0000\r")
+        raw98 = bytearray(bytes.fromhex(REFERENCE_FRAME[13:-5].decode("ascii"))[1:])
+        # In no-flag form, pack voltage begins at bytes 2-3; deliberately
+        # replace 53.12 V by 70 V, retaining the original 16 cell readings.
+        raw98[2:4] = b"\x1B\x58"
+        bad = self.v23_reply(1, raw98)
+        with self.assertRaisesRegex(DarenSerialError, "aucune disposition"):
+            decode_passive_response(bad)
+        request_core = "23014A84E00201"
+        request = (
+            f"~{request_core}{checksum(request_core):04X}\r"
+        ).encode("ascii")
+        with self.assertRaisesRegex(DarenSerialError, "non télémétrique"):
+            decode_passive_response(request)
+
+    def test_v23_85_passive_sniffer_recovers_batteries_without_polls(self):
+        p1 = self.v23_reply(1)
+        p2 = self.v23_reply(2)
+        p3 = self.v23_reply(3)
+        req = "23014A84E00201"
+        req_frame = f"~{req}{checksum(req):04X}\r".encode()
+        chunks = [req_frame, p1[:49], p1[49:], p2, p3]
+        class ReceiveOnlyPort:
+            def __init__(self, *args, **kwargs):
+                self.messages = chunks.copy()
+            def read_until(self, terminator, size):
+                return self.messages.pop(0) if self.messages else b""
+            def write(self, *args):
+                raise AssertionError("Passive mode transmitted data!")
+            def reset_input_buffer(self):
+                raise AssertionError("Passive mode discarded existing traffic!")
+            def flush(self):
+                raise AssertionError("Passive mode flushed writes!")
+            def close(self):
+                pass
+
+        with patch.dict(sys.modules, {
+            "serial": types.SimpleNamespace(Serial=ReceiveOnlyPort),
+        }):
+            monitor = PassiveSerialMonitor("/dev/ttyUSB123", 9600)
+            monitor.open()
+            records, stats = monitor.read_window(0.06)
+            monitor.close()
+        self.assertEqual(set(records), {1, 2, 3})
+        self.assertEqual(stats["responses"], 3)
+        self.assertEqual(stats["other_frames"], 1)
+        self.assertEqual(stats["layouts"]["v23/85_sans_flag_initial"], 3)
 
     def test_passive_mode_decodes_master_bus_replies_without_any_write(self):
         frame1 = self.sample_for_bus_address(1)
