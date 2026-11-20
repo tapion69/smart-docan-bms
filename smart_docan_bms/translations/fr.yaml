@@ -7,10 +7,10 @@ configuration:
     description: Vide par défaut ; saisir soi-même /dev/serial/by-id/... du convertisseur USB-RS485
   serial_baudrate:
     name: Serial - vitesse (bauds)
-    description: 19200 pour le protocole Daren DR-1363 documenté ; 9600 si nécessaire
+    description: 9600 par défaut pour les batteries Docan vérifiées ; 19200 possible selon BMS
   serial_addresses:
     name: Serial - adresses BMS à interroger (facultatif)
-    description: Vide = essayer les adresses 1 à 4 ; sinon saisir par exemple 1,2,3 (adresses 1 à 15)
+    description: Vide = essayer la Master (adresse 0), puis les adresses 1 à 4 ; sinon saisir par exemple 0,1,2,3 (adresses 0 à 15)
   serial_slot_1_address:
     name: Batterie 1 - adresse RS485 (facultatif)
     description: Vide = attribution automatique ; si renseignée, ce BMS conserve le numéro Batterie 1
