@@ -22,6 +22,33 @@ class DarenSerialError(ValueError):
     """Invalid or incompatible response, safe to report without raw data."""
 
 
+# Documented alarm/protection bits for Daren DR-1363 service 0x42.
+# See cpttinkering/daren-485, Daren485.get_realtime_data(): not all
+# non-zero status bits indicate protection. In particular CURRENT bit 1
+# (0x0002) is NOT documented as an overcurrent/short-circuit alarm.
+#
+# Voltage: cell/pack over/under-voltage, warnings, imbalance, fuse.
+# Current: CHG_OC_PROT, short circuit, DISCH_OC1/2_PROT, CHG/DISCH_OC_ALARM.
+# Temperature: charge/discharge/internal over/under-temperature and alarms.
+# Warning: internal component failures bits 1..6 and low battery bit 7.
+#
+# Preserve the original four raw words in problem_code for diagnostics.
+VOLTAGE_ALARM_MASK = 0x61FF   # bits 0..8, 13, 14
+CURRENT_ALARM_MASK = 0x00FC   # bits 2..7 (NOT bit 1)
+TEMPERATURE_ALARM_MASK = 0x7F7F  # bits 0..6 and 8..14
+WARNING_ALARM_MASK = 0x00FE  # bits 1..7
+
+
+def active_alarm_flags(voltage: int, current: int, temperature: int, warning: int) -> tuple[int, int, int, int]:
+    """Return only verified alarm bits; do not treat ordinary status flags as faults."""
+    return (
+        voltage & VOLTAGE_ALARM_MASK,
+        current & CURRENT_ALARM_MASK,
+        temperature & TEMPERATURE_ALARM_MASK,
+        warning & WARNING_ALARM_MASK,
+    )
+
+
 def validate_port(path: str) -> str:
     path = str(path or "").strip()
     if not path:
@@ -157,9 +184,12 @@ def decode_response(frame: bytes, expected_address: int) -> dict:
     if not 0 <= soh <= 100 or capacity < 0 or remaining < 0:
         raise DarenSerialError("Capacité ou SOH RS485 incohérents")
 
-    alarms = voltage_flags | current_flags | temp_flags | warning_flags
-    # Clear status flags (0 = no event); avoid assuming BMS has no alarm
-    # if a response lacks the corresponding fields.
+    validated_alarms = active_alarm_flags(
+        voltage_flags, current_flags, temp_flags, warning_flags
+    )
+    # Protect against false positives: these words mix status and alarm bits.
+    # E.g. current_flags == 0x0002 alone is not a documented overcurrent alarm.
+    # Raw status words are still retained for diagnostics.
     sample = {
         "battery_level": round(soc, 2),
         "voltage": voltage,
@@ -173,7 +203,7 @@ def decode_response(frame: bytes, expected_address: int) -> dict:
         "temperature": pack_temp,
         "temp_values": [ambient, pack_temp, mos_temp] + cell_temps,
         "temp_sensors": 3 + cell_temp_count,
-        "problem": bool(alarms),
+        "problem": any(validated_alarms),
         "problem_code": f"{voltage_flags:04X}/{current_flags:04X}/{temp_flags:04X}/{warning_flags:04X}",
         "chrg_mosfet": bool(fet_flags & 1),
         "dischrg_mosfet": bool(fet_flags & 2),
