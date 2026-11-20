@@ -327,6 +327,44 @@ def _passive_telemetry_address(frame: bytes) -> int | None:
         return None
 
 
+
+def passive_frame_signature(frame: bytes) -> str:
+    """Privacy-preserving description of a captured serial frame.
+
+    Only log framing metadata, not raw telegrams, payload, serial numbers,
+    battery measurements or MAC addresses. This distinguishes service-42
+    replies from the different commands a real Master may actually use.
+    """
+    try:
+        line = frame.decode("ascii")
+    except UnicodeDecodeError:
+        return "non_ASCII"
+    if not line.startswith("~") or not line.endswith("\r") or len(line) < 18:
+        return "hors_format"
+    core, crc = line[1:-5], line[-5:-1]
+    if (
+        len(core) < 12 or len(core[12:]) % 2
+        or not ASCII_HEX.fullmatch(core)
+        or not ASCII_HEX.fullmatch(crc)
+    ):
+        return "non_hexadecimal"
+    version = core[0:2].upper()
+    address = core[2:4].upper()
+    cid1 = core[4:6].upper()
+    cid2 = core[6:8].upper()
+    body_chars = len(core) - 12
+    payload_bytes = body_chars // 2
+    checksum_ok = checksum(core) == int(crc, 16)
+    length_ok = length_checksum(body_chars) == int(core[8:12], 16)
+    # The fields below are protocol header metadata only. No DATAI is logged.
+    return (
+        f"v{version}-a{address}-c{cid1}-k{cid2}-"
+        f"{payload_bytes}o-"
+        f"{'crcOK' if checksum_ok else 'crcKO'}-"
+        f"{'lenOK' if length_ok else 'lenKO'}"
+    )
+
+
 class PassiveSerialMonitor:
     """Single persistent RS485 receive-only connection, **never transmits**.
 
@@ -363,7 +401,7 @@ class PassiveSerialMonitor:
         deadline = time.monotonic() + max(0.01, min(float(seconds), 15.0))
         records: dict[int, dict] = {}
         stats = {"bytes": 0, "frames": 0, "responses": 0,
-                 "other_frames": 0, "rejected": 0}
+                 "other_frames": 0, "rejected": 0, "signatures": {}}
         while time.monotonic() < deadline:
             chunk = self._port.read_until(b"\r", size=512)
             if not chunk:
@@ -372,6 +410,9 @@ class PassiveSerialMonitor:
             self._pending.extend(chunk)
             for frame in _extract_frames(self._pending):
                 stats["frames"] += 1
+                signature = passive_frame_signature(frame)
+                kinds = stats["signatures"]
+                kinds[signature] = kinds.get(signature, 0) + 1
                 address = _passive_telemetry_address(frame)
                 if address is None:
                     stats["other_frames"] += 1

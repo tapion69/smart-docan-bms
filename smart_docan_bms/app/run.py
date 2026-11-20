@@ -325,6 +325,8 @@ async def run_serial_passive(settings: dict) -> None:
     latest: dict[int, float] = {}
     last_report = 0.0
     stale_after = max(90, 3 * polling)
+    passive_totals = {k: 0 for k in ("bytes", "frames", "responses", "other_frames", "rejected")}
+    passive_signatures: dict[str, int] = {}
     LOG.info(
         "RS485 ÉCOUTE PASSIVE : aucune requête série envoyée ; vitesse %d ; "
         "adresses reçues %s ; délai hors ligne %d s",
@@ -381,6 +383,10 @@ async def run_serial_passive(settings: dict) -> None:
                         records, stats = await asyncio.to_thread(
                             monitor.read_window, 4.0
                         )
+                        for key in passive_totals:
+                            passive_totals[key] += stats[key]
+                        for key, count in stats.get("signatures", {}).items():
+                            passive_signatures[key] = passive_signatures.get(key, 0) + count
                         for address, sample in sorted(records.items()):
                             if requested is not None and address not in requested:
                                 continue
@@ -438,16 +444,35 @@ async def run_serial_passive(settings: dict) -> None:
                                     bridge.battery(rec)
 
                         if now - last_report >= 30:
+                            # Aggregate across all received 4 s windows, not
+                            # just the last one. Header metadata only: no raw
+                            # DATAI, IDs, SOC, secrets or serial telegrams.
+                            ranked = sorted(
+                                passive_signatures.items(),
+                                key=lambda pair: (-pair[1], pair[0]),
+                            )
+                            preview = ", ".join(
+                                f"{signature} x{count}"
+                                for signature, count in ranked[:8]
+                            ) or "aucune trame complète"
+                            if len(ranked) > 8:
+                                preview += f" ; {len(ranked) - 8} autres types"
                             LOG.info(
-                                "RS485 passif (4 s) : %d octets ; %d trames ; "
+                                "RS485 passif (~30 s) : %d octets ; %d trames ; "
                                 "%d réponses télémétriques valides ; "
                                 "%d autres trames ; %d trames invalides ; "
                                 "batteries %d/%d en ligne",
-                                stats["bytes"], stats["frames"],
-                                stats["responses"], stats["other_frames"],
-                                stats["rejected"], store.aggregate["online_count"],
+                                passive_totals["bytes"], passive_totals["frames"],
+                                passive_totals["responses"], passive_totals["other_frames"],
+                                passive_totals["rejected"], store.aggregate["online_count"],
                                 store.aggregate["expected_count"],
                             )
+                            LOG.info(
+                                "RS485 diagnostic passif (entêtes uniquement) : %s",
+                                preview,
+                            )
+                            passive_totals = {key: 0 for key in passive_totals}
+                            passive_signatures.clear()
                             last_report = now
                     except Exception as exc:
                         LOG.warning(
@@ -628,7 +653,7 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.13-dev — réception RS485 passive sans polling")
+    LOG.info("Smart Docan BMS 0.1.14-dev — diagnostic RS485 passif des entêtes de trames")
     transport = str(settings.get("transport", "bluetooth")).strip().lower()
     if transport == "serial":
         await run_serial(settings)

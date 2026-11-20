@@ -32,7 +32,27 @@ Les capteurs MQTT de tension utilisent `suggested_display_precision` et des mod�
 
 Le dashboard HTML prévu ultérieurement sera développé **séparément** dans Home Assistant et réutilisera les entités fixes MQTT, sans serveur web dans l'add-on.
 
-## Lecture Serial RS485 expérimentale (0.1.13-dev)
+## Lecture Serial RS485 expérimentale (0.1.14-dev)
+
+### Diagnostic de protocole en écoute passive
+
+Si l'écoute passive reçoit des octets mais **0 réponses service 42**, le
+journal indique désormais toutes les ~30 secondes une ligne
+`RS485 diagnostic passif (entêtes uniquement)`. Elle regroupe les types de
+trames observés, par adresse et code de commande ainsi que leur longueur,
+checksum et longueur de données. Exemples de présentation :
+`v22-a01-c4A-k42-1o-crcOK-lenOK` pour une requête de lecture et
+`v22-a01-c4A-k00-99o-crcOK-lenOK` pour une réponse au format attendu.
+
+Ce **n'est pas encore le décodage** des autres services qui pourraient être
+utilisés par la Master. Les données brutes, mesures et identifiants internes
+ne sont jamais affichés dans ces diagnostics. Une fois le type de trame
+identifié, on pourra étudier son contenu et son format avec le protocole
+correspondant, sans activer le polling.
+
+L'écoute passive reste strictement **sans émission sur RS485**, le Bluetooth
+et les entités MQTT existantes sont inchangés.
+
 
 ### Écoute passive lorsque le BMS Master pilote le bus (nouveau)
 
