@@ -28,6 +28,10 @@ from slots import SlotAssignments, MAX_SLOTS, slot_device_id
 from recovery import (
     can_recover_stale_connection, is_attempt_due, missing_slots, scan_interval,
 )
+from daren_serial import (
+    read_bms as read_serial_bms, parse_serial_addresses, validate_port,
+)
+from serial_slots import SerialSlots
 
 LOG = logging.getLogger("smart_docan")
 OPTIONS = Path("/data/options.json")
@@ -49,6 +53,10 @@ def parse_names(text: str) -> dict[str, str]:
 
 def load_options() -> dict:
     defaults = {
+        "transport": "bluetooth",
+        "serial_port": "",
+        "serial_baudrate": 19200,
+        "serial_addresses": "",
         "auto_discover": True, "addresses": "", "names": "", "scan_seconds": 8,
         "poll_seconds": 30, "rescan_seconds": 180,
         "missing_rescan_seconds": 30,
@@ -294,13 +302,133 @@ class MQTTBridge:
         self.client.disconnect()
         self.client.loop_stop()
 
+async def run_serial(settings: dict) -> None:
+    """Read-only serial RS485 loop, with fixed MQTT identities and no BLE polling.
+
+    The RS485 protocol is a best-effort pilot for Daren DR-JC03. A real BMS
+    may speak a different protocol; failed reads must never modify the BMS.
+    """
+    polling = int(settings["poll_seconds"])
+    port = str(settings.get("serial_port") or "").strip()
+    baudrate = int(settings.get("serial_baudrate", 19200))
+    address_list = parse_serial_addresses(settings.get("serial_addresses", ""))
+    serial_slots = SerialSlots(Path("/data/serial_slots.json"), settings)
+    store = Store(poll_seconds=polling)
+    for slot, address in serial_slots.configured():
+        store.register_slot(slot, f"serial:{address:02d}", serial_slots.names[slot])
+    bridge: MQTTBridge | None = None
+    next_mqtt_attempt = 0.0
+    failed: dict[int, int] = {}
+    LOG.info(
+        "Mode Serial RS485 (lecture seule) : vitesse %d, adresses à rechercher %s",
+        baudrate, ",".join(map(str, address_list)),
+    )
+    if not port:
+        LOG.warning(
+            "Mode Serial choisi, mais serial_port est vide. "
+            "Renseignez votre /dev/serial/by-id/... dans la configuration"
+        )
+    else:
+        # This checks only syntax; OS access and protocol are checked at runtime.
+        port = validate_port(port)
+        LOG.info("Port série configuré : %s", port)
+
+    try:
+        while True:
+            started = store.cycle_started()
+            if bridge is None and started >= next_mqtt_attempt:
+                try:
+                    service = mqtt_credentials() if settings.get("mqtt_mode", "auto") == "auto" else None
+                    conf = mqtt_settings(settings, service)
+                    # Never run the old MAC/BLE migration on serial bus ids.
+                    bridge = MQTTBridge(conf, store, migrate_legacy=False)
+                except Exception as exc:
+                    store.mqtt_connected = False
+                    store.mqtt_error = f"Service MQTT indisponible ({type(exc).__name__})"
+                    LOG.warning("MQTT indisponible (%s), nouvel essai dans 60 s", type(exc).__name__)
+                next_mqtt_attempt = time.monotonic() + 60
+
+            if port:
+                # Saved manual/automatic mappings may include addresses outside
+                # the default 1..4 probing range, so always include saved ids.
+                targets = sorted(set(address_list) | {a for _, a in serial_slots.configured()})
+                for address in targets:
+                    slot = serial_slots.slot_for(address)
+                    if slot is None and address in serial_slots.mapping.values():
+                        continue  # disabled slot: do not read or reassign
+                    try:
+                        sample = await asyncio.to_thread(
+                            read_serial_bms, port, baudrate, address
+                        )
+                        if slot is None:
+                            slot = serial_slots.bind_detected(address)
+                            if slot is None:
+                                continue  # four logical slots already occupied
+                            LOG.info(
+                                "RS485 : BMS adresse %d associé à Batterie %d (persistant)",
+                                address, slot,
+                            )
+                        ident = f"serial:{address:02d}"
+                        store.register_slot(slot, ident, serial_slots.names[slot])
+                        data = normalise_sample(sample)
+                        was_offline = not store.batteries[ident].get("online")
+                        store.success(ident, data, {"manufacturer": "Daren", "model": "DR-1363 RS485"})
+                        failed[address] = 0
+                        if was_offline:
+                            LOG.info("Batterie %d : communication RS485 établie (adresse %d)", slot, address)
+                        LOG.info(
+                            "Batterie %d RS485 : SOC %s %% ; %s V ; %d cellules",
+                            slot, data.get("battery_level"), data.get("voltage"),
+                            len([k for k in data if re.fullmatch(r"cell_\\d{2}", k)])
+                        )
+                        if bridge is not None:
+                            bridge.battery(store.batteries[ident])
+                    except Exception as exc:
+                        failed[address] = failed.get(address, 0) + 1
+                        if slot is not None:
+                            ident = f"serial:{address:02d}"
+                            store.failure(ident, exc)
+                            if bridge is not None:
+                                bridge.battery(store.batteries[ident])
+                        if failed[address] <= 2 or failed[address] % 10 == 0:
+                            LOG.warning(
+                                "RS485 adresse %d : aucune télémétrie validée (%s). "
+                                "Vérifier port, adresse, baudrate, A/B et protocole",
+                                address, type(exc).__name__,
+                            )
+
+            if bridge is not None:
+                for slot in range(1, 5):
+                    if slot not in {s for s, _ in serial_slots.configured()}:
+                        bridge.publish(
+                            f"{PREFIX}/{slot_device_id(slot)}/availability", "offline"
+                        )
+                snapshot = store.snapshot()
+                for rec in snapshot["batteries"]:
+                    if not rec["online"]:
+                        bridge.battery(rec)
+                bridge.summary(snapshot["aggregate"])
+            elapsed = time.monotonic() - started
+            store.cycle_finished(elapsed)
+            await asyncio.sleep(remaining_poll_delay(elapsed, polling))
+    finally:
+        if bridge is not None:
+            bridge.stop()
+
+
 async def run() -> None:
     settings = load_options()
     logging.basicConfig(
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.8-dev — parc dynamique et résumés MQTT")
+    LOG.info("Smart Docan BMS 0.1.9-dev — Bluetooth / Serial RS485 Daren")
+    transport = str(settings.get("transport", "bluetooth")).strip().lower()
+    if transport == "serial":
+        await run_serial(settings)
+        return
+    if transport != "bluetooth":
+        raise ValueError("Transport inconnu : bluetooth ou serial uniquement")
     wanted = parse_addresses(settings.get("addresses", ""))
     slots = SlotAssignments(Path("/data/slots.json"), settings)
     if not settings.get("auto_discover", True) and not wanted and not slots.configured():
