@@ -45,6 +45,8 @@ jobs:
           assert config["options"]["transport"] == "bluetooth"
           assert config["schema"]["transport"] == "list(bluetooth|serial)"
           assert config["options"]["serial_port"] == ""
+          assert config["options"]["serial_passive"] is False
+          assert config["schema"]["serial_passive"] == "bool"
           assert config["schema"]["serial_port"] == "str?"
           assert config["schema"]["serial_baudrate"] == "int(9600,19200)"
           assert "mqtt:want" in config["services"]
