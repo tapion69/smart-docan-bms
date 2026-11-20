@@ -1,4 +1,24 @@
 configuration:
+  transport:
+    name: Communication transport
+    description: bluetooth = existing behaviour ; serial = experimental Daren RS485 read-only driver
+  serial_port:
+    name: Serial device path (user supplied)
+    description: Empty by default; enter the USB-RS485 device's own /dev/serial/by-id/... path
+  serial_baudrate:
+    name: Serial baud rate
+    description: 19200 for documented Daren DR-1363, or 9600 if needed
+  serial_addresses:
+    name: Serial BMS bus addresses (optional)
+    description: Blank probes 1 to 4; otherwise provide a comma separated list such as 1,2,3
+  serial_slot_1_address:
+    name: Battery 1 - RS485 bus address (optional)
+  serial_slot_2_address:
+    name: Battery 2 - RS485 bus address (optional)
+  serial_slot_3_address:
+    name: Battery 3 - RS485 bus address (optional)
+  serial_slot_4_address:
+    name: Battery 4 - RS485 bus address (optional)
   strict_slots:
     name: Strict battery slots
     description: Do not automatically assign newly discovered Bluetooth devices to an unused slot
