@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 import struct
+import time
 
 ASCII_HEX = re.compile(r"^[0-9A-Fa-f]+$")
 SUPPORTED_BAUDS = {9600, 19200}
@@ -186,20 +187,83 @@ def decode_response(frame: bytes, expected_address: int) -> dict:
     return sample
 
 
-def read_bms(port: str, baudrate: int, address: int, timeout: float = 1.6) -> dict:
-    """One timed, read-only serial transaction. Call via asyncio.to_thread."""
+def _extract_frames(buffer: bytearray) -> list[bytes]:
+    """Recover ASCII ~...CR frames from serial chunks, ignoring stray preamble.
+
+    RS485 converters sometimes echo their own request or receive fragmented
+    frames. Keep complete frames separated by CR until a valid reply arrives.
+    A second '~' supersedes an incomplete/noisy prefix. Never interpret a
+    binary frame as a Daren telemetry frame.
+    """
+    frames: list[bytes] = []
+    while (end := buffer.find(b"\r")) >= 0:
+        chunk = bytes(buffer[:end + 1])
+        del buffer[:end + 1]
+        start = chunk.rfind(b"~")
+        if start >= 0:
+            frames.append(chunk[start:])
+    if len(buffer) > 1024:
+        # A protocol with no CR delimiters must not grow the memory forever.
+        start = buffer.rfind(b"~")
+        if start >= 0 and len(buffer) - start <= 512:
+            del buffer[:start]
+        else:
+            buffer.clear()
+    return frames
+
+
+def read_bms(port: str, baudrate: int, address: int, timeout: float = 2.2) -> dict:
+    """Read one BMS, tolerating an echoed request and unrelated serial noise.
+
+    Serial diagnostics intentionally log only counts/error classes; no raw
+    frames, serial numbers or personal battery information are recorded.
+    """
     validate_port(port)
     if int(baudrate) not in SUPPORTED_BAUDS:
         raise ValueError("Vitesse RS485 non prévue (9600 ou 19200)")
     import serial
 
     req = read_request(address)
-    with serial.Serial(port, baudrate=int(baudrate), timeout=timeout,
-                       write_timeout=timeout, bytesize=8, parity="N", stopbits=1) as ser:
+    bytes_seen = 0
+    non_ascii = 0
+    echoed = 0
+    rejected = 0
+    last_error = "aucune trame complète"
+    buffer = bytearray()
+    with serial.Serial(
+        port, baudrate=int(baudrate), timeout=min(timeout, 0.25),
+        write_timeout=timeout, bytesize=8, parity="N", stopbits=1,
+    ) as ser:
         ser.reset_input_buffer()
         ser.write(req)
         ser.flush()
-        response = ser.read_until(b"\r", size=512)
-    if not response:
-        raise TimeoutError("Aucune réponse RS485 (adresse, câblage A/B ou protocole)")
-    return decode_response(response, address)
+        deadline = time.monotonic() + timeout
+        # One query per address: never send additional commands on a noisy bus.
+        while time.monotonic() < deadline and bytes_seen < 2048:
+            received = ser.read_until(b"\r", size=512)
+            if not received:
+                continue
+            bytes_seen += len(received)
+            non_ascii += sum(c not in (10, 13) and not 32 <= c <= 126 for c in received)
+            buffer.extend(received)
+            for frame in _extract_frames(buffer):
+                if frame == req:
+                    echoed += 1
+                    continue
+                try:
+                    return decode_response(frame, address)
+                except DarenSerialError as exc:
+                    rejected += 1
+                    last_error = str(exc)
+                    # One bad reply must not hide a later valid reply.
+
+    if bytes_seen == 0:
+        raise TimeoutError(
+            "Aucun octet reçu (adresse RS485, A/B, vitesse, protocole ou bus)"
+        )
+    raise DarenSerialError(
+        "Aucune réponse Daren valide : "
+        f"octets={bytes_seen}, échos={echoed}, "
+        f"octets_non_ASCII={non_ascii}, trames_rejetées={rejected} ; "
+        f"dernier_défaut={last_error}"
+    )
