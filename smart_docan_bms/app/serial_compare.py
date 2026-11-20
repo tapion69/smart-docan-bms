@@ -230,6 +230,7 @@ def compare_payloads(payloads: dict[int, bytes], ble_profiles: dict[int, dict]) 
                         "min_status": min_status,
                         "ble_soc": ref.get("soc"),
                         "soc_sites": set(soc_sites),
+                        "soc_candidate_values": soc_sites,
                         "soc_offsets": sorted({p for p, _ in soc_sites})[:8],
                         "pack_voltage_offsets": scalar_offsets(
                             raw, ref.get("voltage"), 100, endian, .18,
@@ -262,6 +263,7 @@ def compare_payloads(payloads: dict[int, bytes], ble_profiles: dict[int, dict]) 
         for candidate in pairs:
             row = dict(candidate)
             row.pop("soc_sites", None)
+            row.pop("soc_candidate_values", None)
             site = candidate["soc_sites"]
             soc_status = (
                 "match" if primary_soc in site else
@@ -269,6 +271,12 @@ def compare_payloads(payloads: dict[int, bytes], ble_profiles: dict[int, dict]) 
                 "unconfirmed"
             )
             row["soc_status"] = soc_status
+            # Only publish to the *diagnostic line*: RS485 has not yet
+            # been certified as a telemetry source and never feeds MQTT.
+            row["rs485_soc_candidate"] = (
+                candidate["soc_candidate_values"].get(primary_soc)
+                if primary_soc is not None else None
+            )
             row["soc_schema"] = (
                 f"octet {primary_soc[0]} {primary_soc[1]}"
                 if primary_soc is not None else None
@@ -338,7 +346,8 @@ def summarize_finding(row: dict) -> str:
     )
     soc_text = (
         f" ; SOC BLE {row.get('ble_soc')} % ; "
-        f"SOC RS485 {row.get('soc_schema') or 'champ non confirmé'} "
+        f"SOC RS485 candidat {row.get('rs485_soc_candidate')} % "
+        f"{row.get('soc_schema') or '(champ non confirmé)'} "
         f"({row.get('soc_status')})"
     )
     if row.get("soc_schema_candidates") and not row.get("soc_schema"):
