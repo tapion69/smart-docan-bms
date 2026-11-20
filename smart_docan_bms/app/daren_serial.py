@@ -305,19 +305,127 @@ def read_bms(port: str, baudrate: int, address: int, timeout: float = 2.2) -> di
     )
 
 
+def _plausible_passive_telemetry(sample: dict) -> bool:
+    """Sanity gates for *unverified* v23/85 layout compatibility.
+
+    Correct checksum alone says nothing about the meaning of the data bytes.
+    In particular, never publish guessed battery data unless independent pack
+    voltage and summed cell voltages agree closely.
+    """
+    cells = sample.get("cell_voltages") or []
+    voltage = sample.get("voltage")
+    temperatures = sample.get("temp_values") or []
+    capacity = sample.get("design_capacity")
+    remaining = sample.get("cycle_charge")
+    try:
+        return (
+            8 <= len(cells) <= 32
+            and 10 <= voltage <= 70
+            and abs(sum(cells) - voltage) <= max(0.75, 0.02 * voltage)
+            and all(1.5 <= cell <= 4.6 for cell in cells)
+            and -400 <= sample.get("current") <= 400
+            and len(temperatures) >= 3
+            and all(-40 <= t <= 105 for t in temperatures)
+            and 10 <= capacity <= 2000
+            and 0 <= remaining <= capacity * 1.15
+            and 0 <= sample.get("cycles") <= 100000
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def decode_passive_response(frame: bytes) -> tuple[int, dict, str]:
+    """Parse documented v22/00 telemetry or guarded v23/85 candidate layouts.
+
+    The user's Docan Master sends ASCII v23/4A/84 requests and v23/4A/85
+    replies of 98 data bytes. This v23 payload layout is NOT yet independently
+    documented; try only two one-byte differences vs the v22/00 99-byte
+    reference. A response is accepted only if the framing is correct and
+    exactly one candidate yields physically coherent voltage and cell data.
+
+    Never transmit or alter any BMS. No raw payload is logged.
+    """
+    if not frame or len(frame) > 512:
+        raise DarenSerialError("Trame passive absente ou trop longue")
+    try:
+        text = frame.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise DarenSerialError("Trame passive non ASCII") from exc
+    if not text.startswith("~") or not text.endswith("\r") or len(text) < 18:
+        raise DarenSerialError("Trame passive non encadrée")
+    core = text[1:-5]
+    transmitted = text[-5:-1]
+    if (
+        len(core) < 12 or (len(core) - 12) % 2
+        or not ASCII_HEX.fullmatch(core)
+        or not ASCII_HEX.fullmatch(transmitted)
+    ):
+        raise DarenSerialError("Trame passive non hexadécimale")
+    if checksum(core) != int(transmitted, 16):
+        raise DarenSerialError("Checksum RS485 passif invalide")
+    if int(core[8:12], 16) != length_checksum(len(core) - 12):
+        raise DarenSerialError("Longueur RS485 passive incohérente")
+    version, addr_text, cid1, cid2 = (
+        core[:2].upper(), core[2:4], core[4:6].upper(), core[6:8].upper()
+    )
+    if cid1 != "4A":
+        raise DarenSerialError("Service RS485 non Daren 4A")
+    address = int(addr_text, 16)
+    if not 0 <= address <= 15:
+        raise DarenSerialError("Adresse RS485 non prise en charge")
+    if version == "22" and cid2 == "00":
+        return address, decode_response(frame, address), "v22/00"
+    if version != "23" or cid2 != "85":
+        raise DarenSerialError("Service RS485 non télémétrique")
+    raw = bytes.fromhex(core[12:])
+    if len(raw) != 98:
+        raise DarenSerialError("Longueur v23/85 inattendue : pas de décodage")
+
+    candidates: list[tuple[str, dict]] = []
+    for layout, conventional in (
+        ("v23/85_sans_flag_initial", b"\x00" + raw),
+        ("v23/85_sans_octet_final", raw + b"\x00"),
+    ):
+        # Reuse the established v22 parser rather than duplicating numerous
+        # offsets, but never accept its output without independent checks.
+        old_core = (
+            f"22{address:02X}4A00{length_checksum(len(conventional) * 2):04X}"
+            + conventional.hex().upper()
+        )
+        old_frame = f"~{old_core}{checksum(old_core):04X}\r".encode("ascii")
+        try:
+            sample = decode_response(old_frame, address)
+        except DarenSerialError:
+            continue
+        if _plausible_passive_telemetry(sample):
+            candidates.append((layout, sample))
+
+    if len(candidates) != 1:
+        if not candidates:
+            raise DarenSerialError(
+                "Trame v23/85 intègre, mais aucune disposition de données validée"
+            )
+        raise DarenSerialError(
+            "Trame v23/85 ambiguë : plusieurs dispositions plausibles"
+        )
+    layout, sample = candidates[0]
+    return address, sample, layout
+
+
 def _passive_telemetry_address(frame: bytes) -> int | None:
     """Find addressed service-42-like response; reject master requests.
 
-    Response header: ~ 22 ADR 4A 00 LENID ... CHECKSUM CR
-    Request header:  ~ 22 ADR 4A 42 LENID ... CHECKSUM CR
-    The final telemetry decoder still verifies address, length, CRC and
-    battery values before any MQTT entity can be updated.
+    Candidate responses: v22 / 4A / 00, or v23 / 4A / 85.
+    Master polling requests such as v23 / 4A / 84 are explicitly ignored.
+    A separate decoder validates checksums and data plausibility.
     """
     try:
         text = frame.decode("ascii")
         if not text.startswith("~") or len(text) < 18:
             return None
-        if text[1:3].upper() != "22" or text[5:9].upper() != "4A00":
+        version = text[1:3].upper()
+        service = text[5:9].upper()
+        if (version, service) not in (("22", "4A00"), ("23", "4A85")):
             return None
         address = int(text[3:5], 16)
         if not 0 <= address <= 15:
@@ -401,7 +509,8 @@ class PassiveSerialMonitor:
         deadline = time.monotonic() + max(0.01, min(float(seconds), 15.0))
         records: dict[int, dict] = {}
         stats = {"bytes": 0, "frames": 0, "responses": 0,
-                 "other_frames": 0, "rejected": 0, "signatures": {}}
+                 "other_frames": 0, "rejected": 0, "signatures": {},
+                 "layouts": {}, "reject_reasons": {}}
         while time.monotonic() < deadline:
             chunk = self._port.read_until(b"\r", size=512)
             if not chunk:
@@ -418,11 +527,20 @@ class PassiveSerialMonitor:
                     stats["other_frames"] += 1
                     continue
                 try:
-                    sample = decode_response(frame, address)
-                except DarenSerialError:
+                    decoded_address, sample, layout = decode_passive_response(frame)
+                except DarenSerialError as exc:
+                    stats["rejected"] += 1
+                    # The exception is a fixed category, never a raw frame.
+                    reasons = stats["reject_reasons"]
+                    category = str(exc)[:90]
+                    reasons[category] = reasons.get(category, 0) + 1
+                    continue
+                if decoded_address != address:
                     stats["rejected"] += 1
                     continue
                 stats["responses"] += 1
+                layouts = stats["layouts"]
+                layouts[layout] = layouts.get(layout, 0) + 1
                 records[address] = sample
         return records, stats
 
