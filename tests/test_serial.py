@@ -99,6 +99,87 @@ class SerialProtocolTests(unittest.TestCase):
         self.assertEqual(sample["battery_level"], 67)
         self.assertEqual(writes, [b"~22014A42E00201FD28\r"])
 
+    def test_serial_ignores_echo_binary_preamble_and_fragmented_response(self):
+        request = read_request(1)
+        chunks = [
+            bytes((255, 0)) + b"BAD\r", request,
+            REFERENCE_FRAME[:17],
+            REFERENCE_FRAME[17:91],
+            REFERENCE_FRAME[91:],
+        ]
+        sent = []
+
+        class FakeSerial:
+            def __init__(self, *args, **kwargs):
+                self.parts = chunks.copy()
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def reset_input_buffer(self):
+                pass
+            def write(self, request_bytes):
+                sent.append(request_bytes)
+            def flush(self):
+                pass
+            def read_until(self, delimiter, size):
+                return self.parts.pop(0) if self.parts else b""
+
+        with patch.dict(sys.modules, {"serial": types.SimpleNamespace(Serial=FakeSerial)}):
+            sample = read_bms("/dev/ttyUSB123", 19200, 1, timeout=0.25)
+        self.assertEqual(sample["battery_level"], 67.0)
+        self.assertEqual(sent, [request], "Only one read command may be sent")
+
+    def test_serial_echo_alone_does_not_create_false_bms(self):
+        request = read_request(1)
+
+        class FakeSerial:
+            def __init__(self, *args, **kwargs):
+                self.sent = False
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def reset_input_buffer(self):
+                pass
+            def write(self, data):
+                pass
+            def flush(self):
+                pass
+            def read_until(self, delimiter, size):
+                if not self.sent:
+                    self.sent = True
+                    return request
+                return b""
+
+        with patch.dict(sys.modules, {"serial": types.SimpleNamespace(Serial=FakeSerial)}):
+            with self.assertRaisesRegex(DarenSerialError, "échos=1"):
+                read_bms("/dev/ttyUSB123", 19200, 1, timeout=0.04)
+
+    def test_serial_reports_binary_noise_without_exposing_raw_traffic(self):
+        class FakeSerial:
+            def __init__(self, *args, **kwargs):
+                self.sent = False
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def reset_input_buffer(self):
+                pass
+            def write(self, data):
+                pass
+            def flush(self):
+                pass
+            def read_until(self, delimiter, size):
+                if not self.sent:
+                    self.sent = True
+                    return bytes((128, 255, 0, 13))
+                return b""
+
+        with patch.dict(sys.modules, {"serial": types.SimpleNamespace(Serial=FakeSerial)}):
+            with self.assertRaisesRegex(DarenSerialError, "octets_non_ASCII=3"):
+                read_bms("/dev/ttyUSB123", 19200, 1, timeout=0.04)
+
     def test_persistent_serial_slots_separate_from_ble(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "serial_slots.json"

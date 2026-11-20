@@ -422,7 +422,7 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.9-dev — Bluetooth / Serial RS485 Daren")
+    LOG.info("Smart Docan BMS 0.1.10-dev — diagnostics RS485 et trames multi-réponses")
     transport = str(settings.get("transport", "bluetooth")).strip().lower()
     if transport == "serial":
         await run_serial(settings)
