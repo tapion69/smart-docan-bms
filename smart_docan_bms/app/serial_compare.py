@@ -167,13 +167,16 @@ def shared_soc_hypotheses(pairs_by_address: dict[int, list[dict]],
 
 
 def compare_payloads(payloads: dict[int, bytes], ble_profiles: dict[int, dict]) -> list[dict]:
-    """Return candidate associations, never implicit serial-address=BLE-slot.
+    """Compare cell vectors, reliable minimum-cell positions and SOC evidence.
 
-    Require a close 16-cell match and a meaningful score margin against other
-    BLE devices. The result is **diagnostic only** and must not be persisted as
-    a slot assignment or used to publish guessed telemetry.
+    No association is based on BLE slot order or bus address. SOC offsets are
+    learned only if a shared format explains >=2 different RS485 addresses
+    with >=2 distinct SOC groups. Multiple equally plausible offsets remain
+    unconfirmed. Findings are diagnostic only: no file/MQTT mutations.
     """
-    findings: list[dict] = []
+    findings = []
+    pairs_by_address: dict[int, list[dict]] = {}
+
     for address, raw in sorted(payloads.items()):
         if len(raw) != 98 or not 0 <= address <= 15:
             continue
@@ -181,93 +184,169 @@ def compare_payloads(payloads: dict[int, bytes], ble_profiles: dict[int, dict]) 
         if not sequences:
             findings.append({"address": address, "status": "no_cell_pattern"})
             continue
-        best_for_slot: list[dict] = []
-        for ble_slot, ref in ble_profiles.items():
-            cells = ref["cells"]
-            all_matches = []
-            for offset, endian, candidate in sequences:
-                for direction, vector in (("normal", candidate), ("reverse", candidate[::-1])):
-                    differences = [abs(a-b) for a,b in zip(cells, vector)]
-                    mae = sum(differences) / len(differences)
-                    maxdiff = max(differences)
-                    all_matches.append({
-                        "address": address,
-                        "ble_slot": ble_slot,
-                        "cell_offset": offset,
-                        "endian": endian,
-                        "direction": direction,
-                        "mean_mv": round(mae*1000, 2),
-                        "max_mv": round(maxdiff*1000, 2),
-                    })
-            if all_matches:
-                best_for_slot.append(min(
-                    all_matches, key=lambda o: (o["mean_mv"], o["max_mv"])
-                ))
-        if not best_for_slot:
+        if not ble_profiles:
             findings.append({"address": address, "status": "missing_ble_reference"})
             continue
-        ranked = sorted(best_for_slot, key=lambda o: (o["mean_mv"], o["max_mv"]))
-        best = dict(ranked[0])
+        by_slot = []
+        for ble_slot, ref in ble_profiles.items():
+            candidates = []
+            for offset, endian, candidate in sequences:
+                for direction, vector in (
+                    ("normal", candidate), ("reverse", candidate[::-1])
+                ):
+                    differences = [abs(a-b) for a, b in zip(ref["cells"], vector)]
+                    avg = sum(differences) * 1000 / len(differences)
+                    maximum = max(differences) * 1000
+                    rs_low = minimum_cell(vector)
+                    ble_low = ref.get("minimum_cell") or minimum_cell(ref["cells"])
+                    if rs_low[2] and ble_low[2]:
+                        min_status = "match" if rs_low[0] == ble_low[0] else "conflict"
+                    else:
+                        min_status = "indeterminate"
+                    soc_sites = possible_soc_fields(raw, ref.get("soc"), offset)
+                    candidates.append({
+                        "address": address, "ble_slot": ble_slot,
+                        "cell_offset": offset, "endian": endian,
+                        "direction": direction, "mean_mv": round(avg, 2),
+                        "max_mv": round(maximum, 2),
+                        "rs_min_cell": rs_low[0], "ble_min_cell": ble_low[0],
+                        "rs_min_gap_mv": rs_low[1],
+                        "ble_min_gap_mv": ble_low[1],
+                        "min_status": min_status,
+                        "ble_soc": ref.get("soc"),
+                        "soc_sites": set(soc_sites),
+                        "soc_offsets": sorted({p for p, _ in soc_sites})[:8],
+                        "pack_voltage_offsets": scalar_offsets(
+                            raw, ref.get("voltage"), 100, endian, .18,
+                            (offset, offset + 32)
+                        )[:8],
+                    })
+            if candidates:
+                candidates.sort(key=lambda row: (
+                    row["min_status"] == "conflict",
+                    row["mean_mv"], row["max_mv"]
+                ))
+                by_slot.append(candidates[0])
+        if by_slot:
+            pairs_by_address[address] = by_slot
+        else:
+            findings.append({"address": address, "status": "missing_ble_reference"})
+
+    soc_schemas = shared_soc_hypotheses(pairs_by_address, ble_profiles)
+    primary_soc = None
+    if soc_schemas:
+        first = soc_schemas[0]
+        ties = [x for x in soc_schemas[1:]
+                if (x["addresses"], x["levels"]) ==
+                (first["addresses"], first["levels"])]
+        if not ties:
+            primary_soc = (first["offset"], first["encoding"])
+
+    for address, pairs in sorted(pairs_by_address.items()):
+        ranked = []
+        for candidate in pairs:
+            row = dict(candidate)
+            row.pop("soc_sites", None)
+            site = candidate["soc_sites"]
+            soc_status = (
+                "match" if primary_soc in site else
+                "conflict" if primary_soc is not None else
+                "unconfirmed"
+            )
+            row["soc_status"] = soc_status
+            row["soc_schema"] = (
+                f"octet {primary_soc[0]} {primary_soc[1]}"
+                if primary_soc is not None else None
+            )
+            row["soc_schema_candidates"] = [
+                f"{h['offset']}:{h['encoding']}" for h in soc_schemas[:4]
+            ]
+            # Give a reliable matching minimum cell significant but not
+            # absolute weight; minimum index can change while balancing.
+            row["rank_score"] = (
+                row["mean_mv"]
+                + (100 if row["min_status"] == "conflict" else 0)
+                + (30 if soc_status == "conflict" else 0)
+                - (5 if row["min_status"] == "match" else 0)
+                - (6 if soc_status == "match" else 0)
+            )
+            ranked.append(row)
+        ranked.sort(key=lambda row: (
+            row["rank_score"], row["mean_mv"], row["max_mv"], row["ble_slot"]
+        ))
+        best = ranked[0]
         second = ranked[1] if len(ranked) > 1 else None
-        # Avoid matching near-identical cell vectors across different packs.
-        close = best["mean_mv"] <= 12 and best["max_mv"] <= 28
-        distinct = second is None or (
-            second["mean_mv"] - best["mean_mv"] >= 4
-            and second["mean_mv"] >= max(1.4 * best["mean_mv"], best["mean_mv"] + 4)
-        )
         best["other_ble_slot"] = second["ble_slot"] if second else None
         best["other_mean_mv"] = second["mean_mv"] if second else None
-        if not close:
+        close = best["mean_mv"] <= 12 and best["max_mv"] <= 28
+        conflict = best["min_status"] == "conflict" or best["soc_status"] == "conflict"
+        if not close or conflict:
             best["status"] = "no_close_match"
-        elif not distinct:
-            best["status"] = "ambiguous"
-        else:
+        elif second is None or second["mean_mv"] > 12 or second["max_mv"] > 28:
             best["status"] = "candidate"
-            ref = ble_profiles[best["ble_slot"]]
-            excluded = (best["cell_offset"], best["cell_offset"]+32)
-            best["soc_offsets"] = scalar_offsets(
-                raw, ref.get("soc"), 100, best["endian"], 0.8, excluded
-            )[:6]
-            best["pack_voltage_offsets"] = scalar_offsets(
-                raw, ref.get("voltage"), 100, best["endian"], 0.18, excluded
-            )[:6]
+        else:
+            strong_extra = (
+                best["min_status"] == "match" or
+                best["soc_status"] == "match" or
+                second["mean_mv"] - best["mean_mv"] >= 4
+            )
+            best["status"] = (
+                "candidate"
+                if strong_extra and (second["rank_score"] - best["rank_score"]) >= 4
+                else "ambiguous"
+            )
         findings.append(best)
 
-    # One Bluetooth battery can correspond to only one RS485 address.
-    # Mark colliding candidates ambiguous instead of choosing by bus order.
-    occupied = {}
+    # Never assign one BLE pack to two serial devices through scoring.
+    occupied: dict[int, list[dict]] = {}
     for finding in findings:
         if finding["status"] == "candidate":
             occupied.setdefault(finding["ble_slot"], []).append(finding)
-    for values in occupied.values():
-        if len(values) > 1:
-            for finding in values:
+    for collisions in occupied.values():
+        if len(collisions) > 1:
+            for finding in collisions:
                 finding["status"] = "ambiguous"
     return findings
 
 
 def summarize_finding(row: dict) -> str:
-    """Concise metadata only; no MAC, raw telegram or personal identifiers."""
-    address = row["address"]
-    status = row["status"]
+    """Readable decision evidence without BLE MAC or raw RS485 DATAI."""
+    address, status = row["address"], row["status"]
     if status == "no_cell_pattern":
         return f"RS485 adresse {address} : aucun motif 16 cellules mV identifié"
     if status == "missing_ble_reference":
         return f"RS485 adresse {address} : aucune référence Bluetooth récente"
-    mean = row.get("mean_mv")
-    other = row.get("other_mean_mv")
+    low_text = (
+        f" ; cellule minimale RS485 n°{row.get('rs_min_cell')}, "
+        f"BLE n°{row.get('ble_min_cell')} ({row.get('min_status')}, "
+        f"séparation {row.get('rs_min_gap_mv')}/{row.get('ble_min_gap_mv')} mV)"
+    )
+    soc_text = (
+        f" ; SOC BLE {row.get('ble_soc')} % ; "
+        f"SOC RS485 {row.get('soc_schema') or 'champ non confirmé'} "
+        f"({row.get('soc_status')})"
+    )
+    if row.get("soc_schema_candidates") and not row.get("soc_schema"):
+        soc_text += f" ; hypothèses SOC {','.join(row['soc_schema_candidates'])}"
     if status == "no_close_match":
-        return f"RS485 adresse {address} : empreinte non comparable (écart minimal {mean} mV)"
+        return (
+            f"RS485 adresse {address} : empreinte non comparable "
+            f"(écart minimal {row.get('mean_mv')} mV)"
+            + low_text + soc_text
+        )
     if status == "ambiguous":
         return (
             f"RS485 adresse {address} : correspondance AMBIGUË ; "
-            f"meilleure candidate BLE {row['ble_slot']} ({mean} mV), "
-            f"deuxième écart {other} mV ; aucune association"
+            f"meilleure candidate BLE {row['ble_slot']} ({row['mean_mv']} mV), "
+            f"deuxième écart {row.get('other_mean_mv')} mV ; aucune association"
+            + low_text + soc_text
         )
     return (
         f"RS485 adresse {address} : candidat BLE batterie {row['ble_slot']} ; "
-        f"cellules offset {row['cell_offset']} {row['endian']} {row['direction']} ; "
-        f"écart moyen {mean} mV, max {row['max_mv']} mV ; "
-        f"offsets SOC possibles {row.get('soc_offsets', [])} ; "
+        f"cellules offset {row['cell_offset']} "
+        f"{row['endian']} {row['direction']} ; "
+        f"écart moyen {row['mean_mv']} mV, max {row['max_mv']} mV"
+        + low_text + soc_text
+        + f" ; offsets SOC possibles {row.get('soc_offsets', [])} ; "
         f"tension pack possibles {row.get('pack_voltage_offsets', [])}"
     )
