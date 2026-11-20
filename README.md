@@ -2,7 +2,7 @@
 
 Add-on **Home Assistant OS / Supervised** pour les batteries **Docan Power NOON équipées d'un BMS Daren** diffusant un nom Bluetooth commençant par `DWF`.
 
-> **Statut : 0.1.8-dev — développement, validé sur une première installation à 4 batteries.**
+> **Statut : 0.1.9-dev — développement, validé sur une première installation à 4 batteries.**
 > La lecture des 64 cellules a été confirmée sur cette installation. La connexion MQTT reste à valider sur le matériel cible après configuration manuelle.
 > Ce projet n'effectue aucune commande de configuration des BMS : uniquement des requêtes de télémétrie. Il ne remplace **jamais** les protections du BMS.
 
@@ -19,7 +19,7 @@ Add-on **Home Assistant OS / Supervised** pour les batteries **Docan Power NOON 
 - MQTT automatique (identifiants du Supervisor) ou manuel (hôte, port, identifiant et mot de passe masqué).
 - Période cible de collecte configurable : mesurée du **début du cycle BLE au début du cycle BLE suivant**, et non comme une pause systématique à la fin. Publication MQTT lors des lectures réussies, indépendante du rafraîchissement de la page.
 
-## Présentation des mesures (depuis 0.1.8-dev)
+## Présentation des mesures (depuis 0.1.9-dev)
 
 Le collecteur applique les règles suivantes avant publication MQTT :
 
@@ -31,6 +31,33 @@ Le collecteur applique les règles suivantes avant publication MQTT :
 Les capteurs MQTT de tension utilisent `suggested_display_precision` et des modèles d'état à précision fixe. Ils restent numériques : les décimales ajoutées à l'affichage ne signifient pas que le BMS a gagné en précision de mesure. Les entités ne sont créées que si la donnée correspondante est réellement fournie.
 
 Le dashboard HTML prévu ultérieurement sera développé **séparément** dans Home Assistant et réutilisera les entités fixes MQTT, sans serveur web dans l'add-on.
+
+## Lecture Serial RS485 expérimentale (0.1.9-dev)
+
+L'add-on propose désormais **`transport: bluetooth`** (mode historique, inchangé) et **`transport: serial`** (RS485 filaire). Le service Serial est strictement **en lecture seule**, sans fonction d'écriture de paramètres ou de firmware. Il est basé sur le protocole **Daren DR-1363**, service **42 (GetDeviceInfo)**, documenté par [cpttinkering/daren-485](https://github.com/cpttinkering/daren-485) (MIT). Il peut ne **pas** correspondre aux firmwares de toutes les batteries Docan Power NOON : les premiers journaux du test réel servent à valider le protocole.
+
+### Configuration pour le premier test
+
+```yaml
+transport: serial
+serial_port: ""
+serial_baudrate: 19200
+serial_addresses: ""
+```
+
+**Le champ `serial_port` est intentionnellement vide par défaut.** Chaque utilisateur saisit son propre port matériel, de préférence le chemin stable `/dev/serial/by-id/...`. Aucun port d'un utilisateur n'est préconfiguré ni commité.
+
+- `serial_baudrate` : **19200** par défaut (protocole Daren DR-1363 documenté), ou **9600** à tester si nécessaire.
+- `serial_addresses` : vide = essai des adresses BMS **1, 2, 3 et 4**, sans requête d'écriture ni adresse de diffusion ; sinon `1,2,3` ou une autre liste d'adresses **1 à 15**.
+- `serial_slot_1_address` ... `serial_slot_4_address` : vides = première association automatique à un emplacement libre, sauvegardée dans `/data/serial_slots.json` ; renseignés = attribuer précisément une adresse RS485 à Batterie 1, 2, 3 ou 4.
+- `slot_1_enabled` ... `slot_4_enabled` : les mêmes interrupteurs que pour le Bluetooth, qui déterminent les emplacements pris en compte.
+- `poll_seconds` : même intervalle cible des lectures et publications MQTT.
+
+En mode `serial`, le service **n'interroge pas les appareils Bluetooth**, mais conserve les mêmes `unique_id` MQTT, le même appareil « Docan Power - Global », le dashboard et les totaux adaptatifs. En revenant au mode `bluetooth`, les associations BLE précédentes dans `/data/slots.json` restent intactes. En mode Serial, l'association est stockée **séparément**, dans `/data/serial_slots.json`.
+
+La reconnaissance série d'un nouveau BMS utilise la première réponse **valide** (en-tête, longueur, somme de contrôle, 8 à 32 cellules, plages de mesures plausibles). Cela évite de présenter une trame d'un autre protocole comme une batterie valide. Chaque cycle de recherche est séquentiel et sans écriture de paramètre. Aucun BMS ne répond ? Le journal indique les adresses essayées, les erreurs de protocole ou de communication et les réglages à vérifier.
+
+**Important :** ne pas brancher deux maîtres RS485 actifs sur le même bus, et vérifier la bonne connexion A/B et les adresses des batteries. Le fait que Home Assistant voie le convertisseur USB ne prouve pas que le BMS utilise ce protocole. Il est également normal que les capteurs spécifiques au Bluetooth (RSSI) soient indisponibles en mode Serial.
 
 ## Installation
 
@@ -122,7 +149,7 @@ En mode `auto`, `mqtt_host`, `mqtt_port`, `mqtt_username` et `mqtt_password` son
 - Les mesures sont publiées au broker MQTT après chaque interrogation d'une batterie; Home Assistant reçoit donc les nouveaux états à chaque cycle.
 - Il n'y a plus de paramètre `dashboard_refresh_seconds` : les mises à jour MQTT et le futur dashboard HTML seront indépendants. La cadence de lecture BLE est toujours limitée par le temps de communication avec les quatre batteries.
 
-Les options enregistrées prennent effet au redémarrage de l'add-on. La valeur `poll_seconds: 5` est autorisée depuis 0.1.8-dev. Avec quatre batteries lues successivement, si les quatre échanges Bluetooth demandent plus de cinq secondes, la cadence réelle sera plus longue : aucune lecture en parallèle ni accélération forcée. Des délais trop courts peuvent dégrader la stabilité Bluetooth ; commencer à 30 s et diminuer progressivement.
+Les options enregistrées prennent effet au redémarrage de l'add-on. La valeur `poll_seconds: 5` est autorisée depuis 0.1.9-dev. Avec quatre batteries lues successivement, si les quatre échanges Bluetooth demandent plus de cinq secondes, la cadence réelle sera plus longue : aucune lecture en parallèle ni accélération forcée. Des délais trop courts peuvent dégrader la stabilité Bluetooth ; commencer à 30 s et diminuer progressivement.
 
 ## Diagnostic MQTT et températures
 
@@ -135,7 +162,7 @@ Les options enregistrées prennent effet au redémarrage de l'add-on. La valeur 
 
 **Important :** cette application établit ses propres connexions BLE. Pour éviter les conflits d'accès au même BMS, désactivez temporairement l'entrée des BMS `DWF` dans l'intégration HACS *BLE Battery Management System* pendant les tests de notre add-on. Ne supprimez pas HACS : une simple désactivation suffit et reste réversible.
 
-## Récupération Bluetooth en cas de batterie absente (0.1.8-dev)
+## Récupération Bluetooth en cas de batterie absente (0.1.9-dev)
 
 L'association des batteries aux slots 1 à 4 reste sauvegardée dans `/data/slots.json`. Lorsqu'un scan ne voit que trois batteries affectées sur quatre, la recherche suivante est programmée après **`missing_rescan_seconds` (30 s par défaut)** au lieu de `rescan_seconds` (180 s par défaut).
 
@@ -145,7 +172,7 @@ La réapparition d'une batterie lors d'un scan et le rétablissement des mesures
 
 **Limite matérielle** : si le BMS cesse réellement toute publicité Bluetooth ou s'il est hors de portée, l'add-on ne peut pas le réveiller ni garantir son retour. Vérifier alors sa visibilité dans Home Assistant, un autre scanner et la qualité du signal. Ne pas réinitialiser le contrôleur hci0 (partagé avec Home Assistant), et éviter plusieurs clients connectés simultanément au même BMS. En cas de pertes répétées, on peut augmenter `scan_seconds` de 8 à 12–15 secondes et garder `missing_rescan_seconds` à 30 secondes ; cela augmente le temps consacré à la recherche.
 
-## Connexion Bluetooth bloquée dans BlueZ (0.1.8-dev)
+## Connexion Bluetooth bloquée dans BlueZ (0.1.9-dev)
 
 Lorsque Home Assistant affiche encore une batterie dans **Bluetooth → Connexions**, même après l'arrêt de l'add-on, elle peut être occupée par un autre client ou par une connexion BlueZ orpheline. Dans ce cas, un scan ne pourra parfois plus recevoir d'annonces de cette batterie. La récupération standard 0.1.6 (recherche toutes les 30 s) peut ne pas suffire.
 
@@ -167,7 +194,7 @@ missing_rescan_seconds: 30
 
 Surveiller les messages « déconnexion BlueZ ciblée », « recherche du BMS relancée » et les nouvelles lectures. Une demande de déconnexion terminée **ne garantit pas** que le BMS répondra de nouveau ; le succès est confirmé uniquement par le retour des mesures.
 
-## Nombre de batteries automatique et totaux sûrs (0.1.8-dev)
+## Nombre de batteries automatique et totaux sûrs (0.1.9-dev)
 
 **Le parc ne comporte pas forcément quatre batteries.** En mode découverte automatique, le collecteur associe chaque nouveau BMS DWF à un emplacement libre et sauvegarde l'association dans `/data/slots.json`. Le nombre attendu est **le nombre d'emplacements associés et activés** : 1, 2, 3 ou 4.
 
