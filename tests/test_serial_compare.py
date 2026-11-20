@@ -160,7 +160,59 @@ class DualSerialCompareTests(unittest.TestCase):
             [x["soc_schema"] for x in first],
             ["octet 8 u16_big_div100", "octet 8 u16_big_div100"],
         )
-        self.assertIn("SOC RS485 octet 8", summarize_finding(first[0]))
+        self.assertIn("SOC RS485 candidat 42.0 % octet 8", summarize_finding(first[0]))
+
+    def test_one_soc_byte_is_not_three_independent_fields(self):
+        cells = self.pattern_a()
+        raw = bytearray(self.pack_payload(cells, offset=30, soc=41))
+        raw[5:8] = bytes((0, 41, 0))
+        raw[8:10] = b"\xFA\xFA"
+        result = possible_soc_fields(bytes(raw), 41, cells_start=30)
+        self.assertIn((6, "u8"), result)
+        self.assertNotIn((5, "u16_big_div1"), result)
+        self.assertNotIn((6, "u16_little_div1"), result)
+        self.assertEqual(
+            [key for key in result if key[0] in (5, 6)],
+            [(6, "u8")],
+        )
+
+    def test_37_and_38_percent_are_not_the_same_battery(self):
+        raw = bytearray(self.pack_payload(self.pattern_a(), offset=30, soc=38))
+        raw[5:8] = bytes((0, 38, 0))
+        raw[8:10] = b"\xFA\xFA"
+        self.assertIn((6, "u8"), possible_soc_fields(raw, 38, 30))
+        self.assertNotIn((6, "u8"), possible_soc_fields(raw, 37, 30))
+
+    def test_actual_observed_soc_groups_break_four_similar_cell_profiles(self):
+        # Based on real logs: RS1->BLE2 41%; RS2->BLE4 38%;
+        # RS3->BLE3 37%; BLE1 33% has no passive RS485 reply.
+        # The three logged SOC offsets (5 big /1, 6 little /1, 6 u8)
+        # are zero-padded aliases for exactly one byte at offset 6.
+        cells = self.pattern_a()
+        refs = ble_cell_profiles([
+            self.ble_record(1, cells, soc=33),
+            self.ble_record(2, cells, soc=41),
+            self.ble_record(3, cells, soc=37),
+            self.ble_record(4, cells, soc=38),
+        ])
+        def msg(soc):
+            raw = bytearray(self.pack_payload(cells, offset=30, soc=soc))
+            raw[5:8] = bytes((0, soc, 0))
+            raw[8:10] = b"\xFA\xFA"
+            return bytes(raw)
+        result = compare_payloads({1: msg(41), 2: msg(38), 3: msg(37)}, refs)
+        self.assertEqual([r["status"] for r in result],
+                         ["candidate", "candidate", "candidate"])
+        self.assertEqual([r["ble_slot"] for r in result], [2, 4, 3])
+        self.assertEqual([r["soc_schema"] for r in result],
+                         ["octet 6 u8"] * 3)
+        self.assertEqual([r["soc_status"] for r in result], ["match"] * 3)
+        self.assertEqual([r["rs485_soc_candidate"] for r in result],
+                         [41.0, 38.0, 37.0])
+        self.assertIn("SOC RS485 candidat 41.0 %", summarize_finding(result[0]))
+        self.assertNotIn(1, [r["ble_slot"] for r in result])
+        self.assertTrue(all("cellule minimale" in summarize_finding(r)
+                            for r in result))
 
     def test_soc_only_same_group_cannot_claim_offset_as_confirmed(self):
         cells = self.pattern_a()

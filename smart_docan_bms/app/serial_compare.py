@@ -102,18 +102,25 @@ def minimum_cell(cells: tuple[float, ...] | list[float]) -> tuple[int, float, bo
 
 
 def possible_soc_fields(payload: bytes, target: object,
-                        cells_start: int, tolerance: float = 1.2
+                        cells_start: int, tolerance: float = 0.45
                         ) -> dict[tuple[int, str], float]:
-    """Candidate %SOC *positions*, not an authoritative v23/85 decoder.
+    """Candidate SOC positions, deduplicated when 16-bit forms pad a byte.
 
-    Explore u8 %, u16 /1, /10, /100 with both endiannesses. Exclude
-    the known 16-cell span; never infer an identity from SOC alone.
+    A byte sequence 00 29 00 represents 41% at byte 1 as u8, uint16
+    big-endian from byte 0, or uint16 little-endian from byte 1.
+    These are THREE interpretations of ONE physical byte, not evidence of
+    three different SOC fields. Canonicalize padded /1 forms to u8 before
+    scoring the shared schema across different BMS addresses.
+
+    Tight tolerance (<0.5%) avoids treating integer SOC 37% and 38% as
+    equivalent. This remains an inference, not a certified v23/85 layout.
     """
     if (isinstance(target, bool)
             or not isinstance(target, (int, float))
             or not math.isfinite(float(target))
             or not 0 <= target <= 100):
         return {}
+    tolerance = min(float(tolerance), 0.45)
     excluded = set(range(cells_start, cells_start + 32))
     found: dict[tuple[int, str], float] = {}
     for offset in range(len(payload)):
@@ -127,7 +134,15 @@ def possible_soc_fields(payload: bytes, target: object,
             word = int.from_bytes(payload[offset:offset+2], order)
             for divisor in (1, 10, 100):
                 value = word / divisor
-                if 0 <= value <= 100 and abs(value-float(target)) <= tolerance:
+                if not 0 <= value <= 100 or abs(value-float(target)) > tolerance:
+                    continue
+                # A zero-padded uint16 integer is only the neighboring
+                # one-byte value reinterpreted, and must not compete with it.
+                if divisor == 1 and order == "big" and payload[offset] == 0:
+                    found[(offset + 1, "u8")] = value
+                elif divisor == 1 and order == "little" and payload[offset+1] == 0:
+                    found[(offset, "u8")] = value
+                else:
                     found[(offset, f"u16_{order}_div{divisor}")] = value
     return found
 
@@ -215,6 +230,7 @@ def compare_payloads(payloads: dict[int, bytes], ble_profiles: dict[int, dict]) 
                         "min_status": min_status,
                         "ble_soc": ref.get("soc"),
                         "soc_sites": set(soc_sites),
+                        "soc_candidate_values": soc_sites,
                         "soc_offsets": sorted({p for p, _ in soc_sites})[:8],
                         "pack_voltage_offsets": scalar_offsets(
                             raw, ref.get("voltage"), 100, endian, .18,
@@ -247,6 +263,7 @@ def compare_payloads(payloads: dict[int, bytes], ble_profiles: dict[int, dict]) 
         for candidate in pairs:
             row = dict(candidate)
             row.pop("soc_sites", None)
+            row.pop("soc_candidate_values", None)
             site = candidate["soc_sites"]
             soc_status = (
                 "match" if primary_soc in site else
@@ -254,6 +271,12 @@ def compare_payloads(payloads: dict[int, bytes], ble_profiles: dict[int, dict]) 
                 "unconfirmed"
             )
             row["soc_status"] = soc_status
+            # Only publish to the *diagnostic line*: RS485 has not yet
+            # been certified as a telemetry source and never feeds MQTT.
+            row["rs485_soc_candidate"] = (
+                candidate["soc_candidate_values"].get(primary_soc)
+                if primary_soc is not None else None
+            )
             row["soc_schema"] = (
                 f"octet {primary_soc[0]} {primary_soc[1]}"
                 if primary_soc is not None else None
@@ -323,7 +346,8 @@ def summarize_finding(row: dict) -> str:
     )
     soc_text = (
         f" ; SOC BLE {row.get('ble_soc')} % ; "
-        f"SOC RS485 {row.get('soc_schema') or 'champ non confirmé'} "
+        f"SOC RS485 candidat {row.get('rs485_soc_candidate')} % "
+        f"{row.get('soc_schema') or '(champ non confirmé)'} "
         f"({row.get('soc_status')})"
     )
     if row.get("soc_schema_candidates") and not row.get("soc_schema"):

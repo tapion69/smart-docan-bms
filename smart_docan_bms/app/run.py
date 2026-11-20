@@ -803,6 +803,26 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
                                 )
                         else:
                             vote.pop(addr, None)
+                    # A remaining BLE-only pack is diagnostic evidence,
+                    # not proof of which physical battery is the Master.
+                    confirmed = {
+                        finding["ble_slot"]
+                        for finding in findings
+                        if finding["status"] == "candidate"
+                        and vote.get(finding["address"], (None, 0))[0] == finding["ble_slot"]
+                        and vote.get(finding["address"], (None, 0))[1] >= 2
+                    }
+                    if len(profiles) == 4 and len(confirmed) == 3 and len(recent) == 3:
+                        unmatched = sorted(set(profiles) - confirmed)
+                        if len(unmatched) == 1:
+                            remaining_ble = unmatched[0]
+                            LOG.info(
+                                "Dual batterie sans réponse RS485 directe : "
+                                "Batterie BLE %d (SOC %s %%) ; "
+                                "Master possible, NON confirmée ; "
+                                "aucune correspondance enregistrée",
+                                remaining_ble, profiles[remaining_ble].get("soc"),
+                            )
                     if not findings:
                         LOG.info(
                             "Dual diagnostic : aucune empreinte RS485 à comparer. "
@@ -840,7 +860,7 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.17-dev — comparaison SOC et cellule minimale RS485/BLE")
+    LOG.info("Smart Docan BMS 0.1.18-dev — champ SOC RS485 canonique, diagnostics Master")
     transport = str(settings.get("transport", "bluetooth")).strip().lower()
     if transport == "serial":
         await run_serial(settings)

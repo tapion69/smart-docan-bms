@@ -32,7 +32,41 @@ Les capteurs MQTT de tension utilisent `suggested_display_precision` et des mod�
 
 Le dashboard HTML prévu ultérieurement sera développé **séparément** dans Home Assistant et réutilisera les entités fixes MQTT, sans serveur web dans l'add-on.
 
-## Lecture Serial RS485 expérimentale (0.1.17-dev)
+## Lecture Serial RS485 expérimentale (0.1.18-dev)
+
+### 0.1.18-dev — SOC identifié comme un unique octet, diagnostic de la quatrième batterie
+
+Les journaux de l'installation de test contiennent systématiquement les
+**trois mêmes représentations du SOC** : `5:u16_big_div1`,
+`6:u16_little_div1` et `6:u8`. Le motif `00 29 00` peut être lu
+comme 41 % par ces trois méthodes, mais **il s'agit du même octet à
+l'offset 6**, pas de trois champs indépendants.
+
+Le comparateur regroupe dorénavant ces représentations en un seul
+**candidat `offset 6 / u8`** et réduit à **0,45 point** la tolérance de
+correspondance des SOC. Les SOC 37 % et 38 % ne sont donc plus considérés
+équivalents. Il continue à exiger un champ commun sur plusieurs adresses
+RS485, plusieurs valeurs de SOC et des empreintes cellulaires crédibles.
+
+Lorsque ce champ peut être départagé sans autre hypothèse équivalente,
+le journal indique la **valeur réellement lue comme SOC candidat RS485**,
+par exemple `SOC RS485 candidat 41.0 % octet 6 u8`. Cela reste une
+hypothèse de décodage du protocole `v23/85`, **pas une donnée certifiée ni
+une publication MQTT**.
+
+Si trois adresses RS485 s'associent de manière probable à trois batteries
+BLE différentes lors d'au moins deux cycles, le journal signale aussi
+la **batterie BLE qui n'a pas de réponse RS485 directe**. Cette quatrième
+batterie est une *Master possible* mais **non confirmée** : son identité
+n'est pas imposée, ses données ne sont pas fabriquées et aucune
+association n'est enregistrée automatiquement. Le bus peut interroger
+16 adresses sans que les 16 batteries existent ; une requête `23/84`
+n'est pas une réponse `23/85`.
+
+Le mode `dual` conserve strictement le Bluetooth pour l'alimentation
+MQTT des capteurs, avec le RS485 en **réception seule**.
+
+
 
 ### Comparaison SOC + numéro de cellule minimale (0.1.17-dev)
 
