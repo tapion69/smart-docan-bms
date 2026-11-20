@@ -30,6 +30,7 @@ from recovery import (
 )
 from daren_serial import (
     read_bms as read_serial_bms, parse_serial_addresses, validate_port,
+    PassiveSerialMonitor,
 )
 from serial_slots import SerialSlots
 
@@ -55,6 +56,7 @@ def load_options() -> dict:
     defaults = {
         "transport": "bluetooth",
         "serial_port": "",
+        "serial_passive": False,
         "serial_baudrate": 19200,
         "serial_addresses": "",
         "auto_discover": True, "addresses": "", "names": "", "scan_seconds": 8,
@@ -302,7 +304,192 @@ class MQTTBridge:
         self.client.disconnect()
         self.client.loop_stop()
 
+async def run_serial_passive(settings: dict) -> None:
+    """Listen to BMS Master traffic without transmitting ANY RS485 requests.
+
+    Existing MQTT battery slots and the global aggregate are reused. Listening
+    does not guarantee that the Master itself advertises its own measurements.
+    """
+    polling = int(settings["poll_seconds"])
+    port = str(settings.get("serial_port") or "").strip()
+    baudrate = int(settings.get("serial_baudrate", 9600))
+    addresses_text = str(settings.get("serial_addresses") or "").strip()
+    requested = set(parse_serial_addresses(addresses_text)) if addresses_text else None
+    serial_slots = SerialSlots(Path("/data/serial_slots.json"), settings)
+    store = Store(poll_seconds=polling)
+    for slot, address in serial_slots.configured():
+        store.register_slot(slot, f"serial:{address:02d}", serial_slots.names[slot])
+    bridge: MQTTBridge | None = None
+    monitor: PassiveSerialMonitor | None = None
+    next_mqtt_attempt = 0.0
+    latest: dict[int, float] = {}
+    last_report = 0.0
+    stale_after = max(90, 3 * polling)
+    LOG.info(
+        "RS485 ÉCOUTE PASSIVE : aucune requête série envoyée ; vitesse %d ; "
+        "adresses reçues %s ; délai hors ligne %d s",
+        baudrate, addresses_text if addresses_text else "toutes les adresses 0..15",
+        stale_after,
+    )
+    if not port:
+        LOG.warning(
+            "serial_port vide en écoute passive : renseigner le chemin "
+            "/dev/serial/by-id/... dans la configuration"
+        )
+    else:
+        port = validate_port(port)
+        LOG.info("Port d'écoute RS485 : %s", port)
+
+    try:
+        while True:
+            cycle_started = store.cycle_started()
+            if bridge is None and cycle_started >= next_mqtt_attempt:
+                try:
+                    service = mqtt_credentials() if settings.get("mqtt_mode", "auto") == "auto" else None
+                    config = mqtt_settings(settings, service)
+                    bridge = MQTTBridge(config, store, migrate_legacy=False)
+                except Exception as exc:
+                    store.mqtt_connected = False
+                    store.mqtt_error = (
+                        f"Service MQTT indisponible ({type(exc).__name__})"
+                    )
+                    LOG.warning(
+                        "MQTT indisponible (%s), nouvelle tentative sous 60 s",
+                        type(exc).__name__,
+                    )
+                next_mqtt_attempt = time.monotonic() + 60
+
+            if port:
+                if monitor is None:
+                    try:
+                        monitor = PassiveSerialMonitor(port, baudrate)
+                        await asyncio.to_thread(monitor.open)
+                        LOG.info(
+                            "Écoute passive : port ouvert en réception seule, "
+                            "aucune trame de commande transmise"
+                        )
+                    except Exception as exc:
+                        monitor = None
+                        if time.monotonic() - last_report > 30:
+                            LOG.warning(
+                                "Écoute passive : impossible d'ouvrir le port (%s : %s)",
+                                type(exc).__name__, str(exc)[:140],
+                            )
+                            last_report = time.monotonic()
+                if monitor is not None:
+                    try:
+                        records, stats = await asyncio.to_thread(
+                            monitor.read_window, 4.0
+                        )
+                        for address, sample in sorted(records.items()):
+                            if requested is not None and address not in requested:
+                                continue
+                            slot = serial_slots.slot_for(address)
+                            if slot is None and address in serial_slots.mapping.values():
+                                continue  # disabled slot, keep saved assignment
+                            if slot is None:
+                                slot = serial_slots.bind_detected(address)
+                                if slot is None:
+                                    continue
+                                LOG.info(
+                                    "Écoute passive : adresse RS485 %d liée à Batterie %d",
+                                    address, slot,
+                                )
+                            ident = f"serial:{address:02d}"
+                            store.register_slot(slot, ident, serial_slots.names[slot])
+                            was_offline = not store.batteries[ident]["online"]
+                            data = normalise_sample(sample)
+                            store.success(
+                                ident, data,
+                                {"manufacturer": "Daren", "model": "DR-1363 RS485 passif"},
+                            )
+                            latest[address] = time.monotonic()
+                            if was_offline:
+                                LOG.info(
+                                    "Batterie %d RS485 : réponse valide observée "
+                                    "passivement à l'adresse %d",
+                                    slot, address,
+                                )
+                            if bridge is not None:
+                                bridge.battery(store.batteries[ident])
+
+                        now = time.monotonic()
+                        for slot, address in serial_slots.configured():
+                            ident = f"serial:{address:02d}"
+                            rec = store.batteries.get(ident)
+                            if rec is not None and rec["online"] and (
+                                now - latest.get(address, 0) > stale_after
+                            ):
+                                # No valid service-42 telemetry for a long period
+                                # despite an open bus. Do not keep stale MQTT data.
+                                with store.lock:
+                                    rec["online"] = False
+                                    rec["error"] = (
+                                        f"Aucune trame RS485 passive valide depuis "
+                                        f"plus de {stale_after} s"
+                                    )
+                                    store._refresh()
+                                LOG.warning(
+                                    "Batterie %d RS485 : télémétrie passive périmée "
+                                    "(adresse %d)",
+                                    slot, address,
+                                )
+                                if bridge is not None:
+                                    bridge.battery(rec)
+
+                        if now - last_report >= 30:
+                            LOG.info(
+                                "RS485 passif (4 s) : %d octets ; %d trames ; "
+                                "%d réponses télémétriques valides ; "
+                                "%d autres trames ; %d trames invalides ; "
+                                "batteries %d/%d en ligne",
+                                stats["bytes"], stats["frames"],
+                                stats["responses"], stats["other_frames"],
+                                stats["rejected"], store.aggregate["online_count"],
+                                store.aggregate["expected_count"],
+                            )
+                            last_report = now
+                    except Exception as exc:
+                        LOG.warning(
+                            "Écoute RS485 interrompue (%s : %s) ; réouverture du port",
+                            type(exc).__name__, str(exc)[:140],
+                        )
+                        try:
+                            await asyncio.to_thread(monitor.close)
+                        except Exception:
+                            pass
+                        monitor = None
+
+            if bridge is not None:
+                active = {slot for slot, _ in serial_slots.configured()}
+                for slot in range(1, 5):
+                    if slot not in active:
+                        bridge.publish(
+                            f"{PREFIX}/{slot_device_id(slot)}/availability", "offline"
+                        )
+                for record in store.snapshot()["batteries"]:
+                    if not record["online"]:
+                        bridge.battery(record)
+                bridge.summary(store.snapshot()["aggregate"])
+            elapsed = time.monotonic() - cycle_started
+            store.cycle_finished(elapsed)
+            if not port or monitor is None:
+                await asyncio.sleep(4.0)
+            else:
+                await asyncio.sleep(0)
+    finally:
+        if monitor is not None:
+            await asyncio.to_thread(monitor.close)
+        if bridge is not None:
+            bridge.stop()
+
+
 async def run_serial(settings: dict) -> None:
+    """RS485 bus transport; either existing polling or strictly passive mode."""
+    if bool(settings.get("serial_passive", False)):
+        await run_serial_passive(settings)
+        return
+
     """Read-only serial RS485 loop, with fixed MQTT identities and no BLE polling.
 
     The RS485 protocol is a best-effort pilot for Daren DR-JC03. A real BMS
@@ -441,7 +628,7 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.12-dev — alarmes RS485 fiables et lecture optimisée")
+    LOG.info("Smart Docan BMS 0.1.13-dev — réception RS485 passive sans polling")
     transport = str(settings.get("transport", "bluetooth")).strip().lower()
     if transport == "serial":
         await run_serial(settings)

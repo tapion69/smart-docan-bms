@@ -1,4 +1,7 @@
 configuration:
+  serial_passive:
+    name: Serial — passive listening, no polling
+    description: On = listen to the BMS Master bus without transmitting RS485 requests. Off = previous active polling mode. Master telemetry may not be available if not transmitted.
   transport:
     name: Communication transport
     description: bluetooth = existing behaviour ; serial = experimental Daren RS485 read-only driver

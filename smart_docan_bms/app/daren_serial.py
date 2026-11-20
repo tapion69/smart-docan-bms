@@ -303,3 +303,90 @@ def read_bms(port: str, baudrate: int, address: int, timeout: float = 2.2) -> di
         f"octets_non_ASCII={non_ascii}, trames_rejetées={rejected} ; "
         f"dernier_défaut={last_error}"
     )
+
+
+def _passive_telemetry_address(frame: bytes) -> int | None:
+    """Find addressed service-42-like response; reject master requests.
+
+    Response header: ~ 22 ADR 4A 00 LENID ... CHECKSUM CR
+    Request header:  ~ 22 ADR 4A 42 LENID ... CHECKSUM CR
+    The final telemetry decoder still verifies address, length, CRC and
+    battery values before any MQTT entity can be updated.
+    """
+    try:
+        text = frame.decode("ascii")
+        if not text.startswith("~") or len(text) < 18:
+            return None
+        if text[1:3].upper() != "22" or text[5:9].upper() != "4A00":
+            return None
+        address = int(text[3:5], 16)
+        if not 0 <= address <= 15:
+            return None
+        return address
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
+class PassiveSerialMonitor:
+    """Single persistent RS485 receive-only connection, **never transmits**.
+
+    This is intended for buses on which an existing BMS Master already queries
+    slave batteries. Passive reception is only possible if that traffic crosses
+    the USB-RS485 adapter and contains usable service-42 responses. The Master
+    pack's own telemetry may not be visible when it never replies on that bus.
+    """
+
+    def __init__(self, port: str, baudrate: int, timeout: float = 0.20):
+        self.port = validate_port(port)
+        if int(baudrate) not in SUPPORTED_BAUDS:
+            raise ValueError("Vitesse RS485 non prévue (9600 ou 19200)")
+        self.baudrate = int(baudrate)
+        self.timeout = timeout
+        self._port = None
+        self._pending = bytearray()
+
+    def open(self) -> None:
+        if self._port is not None:
+            return
+        import serial
+
+        # Important: no reset_input_buffer() and no write()/flush(). It is
+        # strictly a monitor of traffic that already exists on the bus.
+        self._port = serial.Serial(
+            self.port, baudrate=self.baudrate, timeout=self.timeout,
+            bytesize=8, parity="N", stopbits=1,
+        )
+
+    def read_window(self, seconds: float = 4.0) -> tuple[dict[int, dict], dict[str, int]]:
+        if self._port is None:
+            raise RuntimeError("Port d'écoute passive non ouvert")
+        deadline = time.monotonic() + max(0.01, min(float(seconds), 15.0))
+        records: dict[int, dict] = {}
+        stats = {"bytes": 0, "frames": 0, "responses": 0,
+                 "other_frames": 0, "rejected": 0}
+        while time.monotonic() < deadline:
+            chunk = self._port.read_until(b"\r", size=512)
+            if not chunk:
+                continue
+            stats["bytes"] += len(chunk)
+            self._pending.extend(chunk)
+            for frame in _extract_frames(self._pending):
+                stats["frames"] += 1
+                address = _passive_telemetry_address(frame)
+                if address is None:
+                    stats["other_frames"] += 1
+                    continue
+                try:
+                    sample = decode_response(frame, address)
+                except DarenSerialError:
+                    stats["rejected"] += 1
+                    continue
+                stats["responses"] += 1
+                records[address] = sample
+        return records, stats
+
+    def close(self) -> None:
+        old = self._port
+        self._port = None
+        if old is not None:
+            old.close()
