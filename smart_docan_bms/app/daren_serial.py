@@ -8,12 +8,9 @@ configuration, switch, EEPROM or firmware commands.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import re
 import struct
-
-import serial
 
 ASCII_HEX = re.compile(r"^[0-9A-Fa-f]+$")
 SUPPORTED_BAUDS = {9600, 19200}
@@ -179,8 +176,10 @@ def decode_response(frame: bytes, expected_address: int) -> dict:
         "dischrg_mosfet": bool(fet_flags & 2),
         "battery_charging": current > 0.05,
     }
-    if len(tail_words) >= 12:
-        balance_flags = tail_words[5] | (tail_words[6] << 16)
+    if len(tail_words) >= 6:
+        # After FET flags: OV protection, UV protection, OV alarm, UV alarm,
+        # then the two cell-balancing words (low and high).
+        balance_flags = tail_words[4] | (tail_words[5] << 16)
         sample["balancer"] = bool(balance_flags)
     if current < -0.2 and remaining > 0:
         sample["runtime"] = round(remaining / abs(current) * 3600)
@@ -192,6 +191,8 @@ def read_bms(port: str, baudrate: int, address: int, timeout: float = 1.6) -> di
     validate_port(port)
     if int(baudrate) not in SUPPORTED_BAUDS:
         raise ValueError("Vitesse RS485 non prévue (9600 ou 19200)")
+    import serial
+
     req = read_request(address)
     with serial.Serial(port, baudrate=int(baudrate), timeout=timeout,
                        write_timeout=timeout, bytesize=8, parity="N", stopbits=1) as ser:
