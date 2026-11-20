@@ -43,6 +43,7 @@ def ble_cell_profiles(records: list[dict], max_age_seconds: int = 180) -> dict[i
             "soc": data.get("battery_level"),
             "voltage": data.get("voltage"),
             "cycles": data.get("cycles"),
+            "minimum_cell": minimum_cell(tuple(float(v) for v in cells)),
         }
     return profiles
 
@@ -84,6 +85,85 @@ def scalar_offsets(payload: bytes, target: object, divisor: float, order: str,
         if abs(val - float(target)) <= tolerance:
             found.append(offset)
     return found
+
+
+
+
+def minimum_cell(cells: tuple[float, ...] | list[float]) -> tuple[int, float, bool]:
+    """1-based index, separation from second minimum in mV, confidence.
+
+    A near tie (below 2 mV) must not be treated as a unique identity.
+    """
+    positions = sorted(range(len(cells)), key=lambda i: (cells[i], i))
+    if len(positions) < 2:
+        return (0, 0.0, False)
+    gap = (cells[positions[1]] - cells[positions[0]]) * 1000
+    return positions[0] + 1, round(gap, 2), gap >= 1.99
+
+
+def possible_soc_fields(payload: bytes, target: object,
+                        cells_start: int, tolerance: float = 1.2
+                        ) -> dict[tuple[int, str], float]:
+    """Candidate %SOC *positions*, not an authoritative v23/85 decoder.
+
+    Explore u8 %, u16 /1, /10, /100 with both endiannesses. Exclude
+    the known 16-cell span; never infer an identity from SOC alone.
+    """
+    if (isinstance(target, bool)
+            or not isinstance(target, (int, float))
+            or not math.isfinite(float(target))
+            or not 0 <= target <= 100):
+        return {}
+    excluded = set(range(cells_start, cells_start + 32))
+    found: dict[tuple[int, str], float] = {}
+    for offset in range(len(payload)):
+        if offset in excluded:
+            continue
+        if abs(payload[offset] - float(target)) <= tolerance:
+            found[(offset, "u8")] = float(payload[offset])
+        if offset + 1 in excluded or offset + 1 >= len(payload):
+            continue
+        for order in ("big", "little"):
+            word = int.from_bytes(payload[offset:offset+2], order)
+            for divisor in (1, 10, 100):
+                value = word / divisor
+                if 0 <= value <= 100 and abs(value-float(target)) <= tolerance:
+                    found[(offset, f"u16_{order}_div{divisor}")] = value
+    return found
+
+
+def shared_soc_hypotheses(pairs_by_address: dict[int, list[dict]],
+                          profiles: dict[int, dict]) -> list[dict]:
+    """Require one *common offset/encoding* across ≥2 addresses AND ≥2 SOC groups.
+
+    Such offsets are diagnostic hypotheses only. Ambiguous sites never
+    disambiguate a battery or become MQTT readings.
+    """
+    sites: dict[tuple[int, str], list[tuple[int, int]]] = {}
+    for addr, pairs in pairs_by_address.items():
+        for p in pairs:
+            if p["mean_mv"] > 12 or p["max_mv"] > 28 or p["min_status"] == "conflict":
+                continue
+            for site in p["soc_sites"]:
+                sites.setdefault(site, []).append((addr, p["ble_slot"]))
+    result = []
+    for (offset, encoding), matches in sites.items():
+        addrs = {a for a, _ in matches}
+        levels = {
+            round(float(profiles[slot]["soc"]), 1)
+            for _, slot in matches
+            if isinstance(profiles[slot].get("soc"), (int, float))
+        }
+        if len(addrs) < 2 or not any(
+                abs(a-b) >= 3 for a in levels for b in levels):
+            continue
+        result.append({
+            "offset": offset, "encoding": encoding,
+            "addresses": len(addrs), "levels": len(levels),
+        })
+    return sorted(result, key=lambda h: (
+        -h["addresses"], -h["levels"], h["offset"], h["encoding"]
+    ))
 
 
 def compare_payloads(payloads: dict[int, bytes], ble_profiles: dict[int, dict]) -> list[dict]:
