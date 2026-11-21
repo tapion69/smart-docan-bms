@@ -360,6 +360,8 @@ async def run_serial(settings: dict) -> None:
                     LOG.error("RS485 : trafic présent, interrogation suspendue jusqu'au redémarrage ; vérifier le port RS485 dédié (pas RS485A/B)")
                 except Exception as exc:
                     LOG.warning("RS485 : port indisponible (%s), nouvel essai au prochain cycle", type(exc).__name__)
+                    for slot, address in serial_slots.configured():
+                        store.failure(f"serial:{address:02d}", exc)
             if port and bus_checked and not bus_blocked:
                 # Stop probing unassigned default addresses once every enabled
                 # logical slot is associated. This avoids querying absent
