@@ -508,7 +508,7 @@ class PassiveSerialMonitor:
             raise RuntimeError("Port d'écoute passive non ouvert")
         deadline = time.monotonic() + max(0.01, min(float(seconds), 15.0))
         records: dict[int, dict] = {}
-        stats = {"bytes": 0, "frames": 0, "responses": 0,
+        stats = {"bytes": 0, "non_ascii_bytes": 0, "frames": 0, "responses": 0,
                  "other_frames": 0, "rejected": 0, "signatures": {},
                  "layouts": {}, "reject_reasons": {},
                  # Retain only latest validated DATAI per address in memory
@@ -520,6 +520,7 @@ class PassiveSerialMonitor:
             if not chunk:
                 continue
             stats["bytes"] += len(chunk)
+            stats["non_ascii_bytes"] += sum(c not in (10, 13) and not 32 <= c <= 126 for c in chunk)
             self._pending.extend(chunk)
             for frame in _extract_frames(self._pending):
                 stats["frames"] += 1

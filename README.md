@@ -32,7 +32,44 @@ Les capteurs MQTT de tension utilisent `suggested_display_precision` et des mod�
 
 Le dashboard HTML prévu ultérieurement sera développé **séparément** dans Home Assistant et réutilisera les entités fixes MQTT, sans serveur web dans l'add-on.
 
-## Lecture Serial RS485 expérimentale (0.1.18-dev)
+## Lecture Serial RS485 expérimentale (0.1.19-dev)
+
+### 0.1.19-dev — diagnostic de la prise RS485 externe dédiée
+
+Le mode `dual` reste passif par défaut. Bluetooth seul alimente MQTT.
+Pour le port RJ45 marqué **RS485** dédié au PC/onduleur (et non RS485A/B
+interbatteries), après vérification du brochage et en l'absence de tout
+autre équipement maître, le diagnostic actif en lecture seule est optionnel :
+
+```yaml
+transport: dual
+dual_rs485_active: true
+serial_baudrate: 9600
+serial_addresses: "0,1,2,3"
+```
+
+Conserver le vrai `serial_port` USB déjà configuré. Ne jamais activer
+`dual_rs485_active` sur un bus interbatteries ou partagé. Une pré-écoute
+de six secondes bloque toute émission si un octet est reçu ; elle ne
+garantit pas à elle seule l'absence d'un autre maître. En cas de trafic
+concurrent détecté, l'interrogation est suspendue jusqu'au redémarrage
+de l'add-on. La collecte BLE continue normalement.
+
+Le seul message transmis est la commande de lecture Daren documentée
+`v22/4A/42`, par défaut aux adresses 0, 1, 2, 3 dans cet ordre. Chaque
+réponse est contrôlée (adresse, format, longueur, checksum). Les diagnostics
+affichent les nombres d'octets, non-ASCII, échos, entêtes et réponses
+décodées, ainsi que les écarts avec les mesures BLE récentes. Aucun champ
+inconnu n'est publié, aucune attribution automatique d'adresse ou de
+Master, aucune écriture de paramètres. Pas de dump de trames brutes.
+
+Si aucun octet ne revient à 9600, vérifier câblage, rôle du port et vitesse
+constructeur avant un essai distinct à 19200. En mode passif, un nouveau
+compteur des octets reçus et non-ASCII permet de distinguer silence et
+protocole non reconnu. Remettre `dual_rs485_active: false` pour revenir
+au diagnostic passif de la version précédente.
+
+
 
 ### 0.1.18-dev — SOC identifié comme un unique octet, diagnostic de la quatrième batterie
 
@@ -123,8 +160,8 @@ serial_addresses: ""
 
 Le **port reste vide par défaut**, à renseigner par chaque utilisateur.
 L'option `serial_passive` n'a aucun effet en mode `dual` :
-**le RS485 est toujours en réception seule**, aucune requête ni
-modification de paramètre n'est envoyée. Le Bluetooth continue ses
+**le RS485 est en réception seule par défaut** (sauf option explicite
+`dual_rs485_active` pour le port externe dédié). Aucune modification de paramètre n'est envoyée. Le Bluetooth continue ses
 cycles normaux et demeure **la seule source MQTT** du dashboard.
 Les associations sauvegardées dans `/data/slots.json` ne changent pas,
 et les observations RS485 n'écrivent pas dans `serial_slots.json`.

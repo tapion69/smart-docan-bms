@@ -34,6 +34,7 @@ from daren_serial import (
 )
 from serial_slots import SerialSlots
 from serial_compare import ble_cell_profiles, compare_payloads, summarize_finding
+from dual_active import probe_cycle, compare_sample
 
 LOG = logging.getLogger("smart_docan")
 OPTIONS = Path("/data/options.json")
@@ -58,6 +59,7 @@ def load_options() -> dict:
         "transport": "bluetooth",
         "serial_port": "",
         "serial_passive": False,
+        "dual_rs485_active": False,
         "serial_baudrate": 19200,
         "serial_addresses": "",
         "auto_discover": True, "addresses": "", "names": "", "scan_seconds": 8,
@@ -700,6 +702,9 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
     previous_report = time.monotonic() - 30
     total_telegrams = 0
     total_v23 = 0
+    total_bytes = 0
+    total_non_ascii = 0
+    all_signatures: dict[str, int] = {}
     # Presence of bus requests does not prove that the Master broadcasts its
     # own telemetry. Track addressed requests and actual replies separately.
     master_requests: dict[int, int] = {}
@@ -722,6 +727,10 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
                 _, stats = await asyncio.to_thread(monitor.read_window, 4.0, True)
                 now = time.monotonic()
                 total_telegrams += stats["frames"]
+                total_bytes += stats["bytes"]
+                total_non_ascii += stats.get("non_ascii_bytes", 0)
+                for signature, count in stats.get("signatures", {}).items():
+                    all_signatures[signature] = all_signatures.get(signature, 0) + count
                 for signature, count in stats.get("signatures", {}).items():
                     header = re.fullmatch(
                         r"v23-a([0-9A-F]{2})-c4A-k([0-9A-F]{2})-\d+o-crcOK-lenOK",
@@ -763,6 +772,8 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
                         "RS485 %d ; aucun polling RS485",
                         total_telegrams, total_v23, len(profiles), len(recent),
                     )
+                    LOG.info("Dual passif réception brute : %d octets ; %d non ASCII ; entêtes %s",
+                             total_bytes, total_non_ascii, dict(sorted(all_signatures.items(), key=lambda p: -p[1])[:16]))
                     requested_list = ",".join(
                         str(x) for x in sorted(master_requests)
                     ) or "aucune"
@@ -831,6 +842,9 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
                         )
                     total_telegrams = 0
                     total_v23 = 0
+                    total_bytes = 0
+                    total_non_ascii = 0
+                    all_signatures.clear()
                     master_requests.clear()
                     master_replies.clear()
                     extra_services.clear()
@@ -854,13 +868,70 @@ async def run_dual_serial_comparison(settings: dict, ble_store: Store) -> None:
             await asyncio.to_thread(monitor.close)
 
 
+async def run_dual_active_comparison(settings: dict, ble_store: Store) -> None:
+    """Explicit PC/inverter port only; diagnostic never modifies MQTT or slots."""
+    port = str(settings.get("serial_port") or "").strip()
+    if not port:
+        LOG.warning("Dual actif : port RS485 absent ; Bluetooth inchangé")
+        return
+    baudrate = int(settings.get("serial_baudrate", 9600))
+    text = str(settings.get("serial_addresses") or "").strip()
+    try:
+        validate_port(port)
+        addresses = parse_serial_addresses(text) if text else (0, 1, 2, 3)
+    except ValueError as exc:
+        LOG.warning("Dual actif : configuration refusée (%s)", exc)
+        return
+    LOG.info("MODE DUAL ACTIF : port externe RS485 dédié uniquement ; "
+             "lecture 0x42 ; Bluetooth seule source MQTT ; adresses %s ; %d bauds",
+             addresses, baudrate)
+    while True:
+        started = time.monotonic()
+        try:
+            result = await asyncio.to_thread(probe_cycle, port, baudrate, addresses)
+            profiles = ble_cell_profiles(ble_store.snapshot()["batteries"])
+            LOG.info("Dual actif : pré-écoute %d octets ; requêtes %d ; références BLE %d",
+                     result["preflight_bytes"], len(result["queries"]), len(profiles))
+            for query in result["queries"]:
+                LOG.info("Dual actif adresse %d : octets=%d ; non_ASCII=%d ; "
+                         "échos=%d ; rejetées=%d ; entêtes=%s",
+                         query["address"], query["bytes"], query["non_ascii"],
+                         query["echoes"], query["rejected"], query["signatures"])
+                sample = query["sample"]
+                if sample is None:
+                    LOG.info("Dual actif adresse %d : aucune réponse 22/00 décodable",
+                             query["address"])
+                    continue
+                LOG.info("Dual actif adresse %d : SOC %.2f %% ; %.2f V ; "
+                         "%d cellules ; courant %.2f A (diagnostic uniquement)",
+                         query["address"], sample["battery_level"], sample["voltage"],
+                         len(sample["cell_voltages"]), sample["current"])
+                candidates = compare_sample(sample, profiles)
+                plausible = [row["slot"] for row in candidates if row["plausible"]]
+                LOG.info("Dual actif adresse %d : comparaison BLE %s ; "
+                         "candidats plausibles %s ; aucune association enregistrée",
+                         query["address"], candidates, plausible)
+            if result["busy"]:
+                LOG.warning("Dual actif suspendu : trafic déjà présent ou autre maître détecté. "
+                            "Aucune nouvelle requête avant redémarrage de l'add-on. "
+                            "Vérifier le port externe dédié ; Bluetooth inchangé.")
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOG.warning("Dual actif interrompu (%s : %s) ; Bluetooth inchangé",
+                        type(exc).__name__, str(exc)[:120])
+            await asyncio.sleep(10)
+        await asyncio.sleep(max(1.0, 30 - (time.monotonic() - started)))
+
+
 async def run() -> None:
     settings = load_options()
     logging.basicConfig(
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.18-dev — champ SOC RS485 canonique, diagnostics Master")
+    LOG.info("Smart Docan BMS 0.1.19-dev — diagnostic RS485 externe actif ou passif")
     transport = str(settings.get("transport", "bluetooth")).strip().lower()
     if transport == "serial":
         await run_serial(settings)
@@ -883,10 +954,16 @@ async def run() -> None:
     next_mqtt_attempt = 0.0
     dual_task: asyncio.Task | None = None
     if transport == "dual":
-        dual_task = asyncio.create_task(
-            run_dual_serial_comparison(settings, store),
-            name="docan-rs485-passive-comparison",
-        )
+        if bool(settings.get("dual_rs485_active", False)):
+            dual_task = asyncio.create_task(
+                run_dual_active_comparison(settings, store),
+                name="docan-rs485-active-comparison",
+            )
+        else:
+            dual_task = asyncio.create_task(
+                run_dual_serial_comparison(settings, store),
+                name="docan-rs485-passive-comparison",
+            )
     LOG.info("Cadence cible de lecture et publication BMS: %d s", polling)
     devices: dict[str, tuple] = {}  # address -> (BLEDevice, RSSI)
     known_info: dict[str, dict] = {}
