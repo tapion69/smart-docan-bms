@@ -22,6 +22,10 @@ class DarenSerialError(ValueError):
     """Invalid or incompatible response, safe to report without raw data."""
 
 
+class SerialBusBusy(DarenSerialError):
+    """Existing traffic: never compete with another master."""
+
+
 # Documented alarm/protection bits for Daren DR-1363 service 0x42.
 # See cpttinkering/daren-485, Daren485.get_realtime_data(): not all
 # non-zero status bits indicate protection. In particular CURRENT bit 1
@@ -248,7 +252,23 @@ def _extract_frames(buffer: bytearray) -> list[bytes]:
     return frames
 
 
-def read_bms(port: str, baudrate: int, address: int, timeout: float = 2.2) -> dict:
+def check_quiet_bus(port: str, baudrate: int, seconds: float = 6.0, *, serial_factory=None, clock=time.monotonic) -> None:
+    """Startup preflight on the dedicated external port, no TX or buffer reset."""
+    validate_port(port)
+    if int(baudrate) not in SUPPORTED_BAUDS:
+        raise ValueError("Vitesse RS485 non prévue")
+    if serial_factory is None:
+        import serial
+        serial_factory = serial.Serial
+    with serial_factory(port, baudrate=int(baudrate), timeout=0.2,
+                        write_timeout=2.2, bytesize=8, parity="N", stopbits=1) as ser:
+        deadline = clock() + seconds
+        while clock() < deadline:
+            if ser.read(512):
+                raise SerialBusBusy("Trafic RS485 avant interrogation")
+
+
+def read_bms(port: str, baudrate: int, address: int, timeout: float = 2.2, *, guard_bus: bool = False) -> dict:
     """Read one BMS, tolerating an echoed request and unrelated serial noise.
 
     Serial diagnostics intentionally log only counts/error classes; no raw
@@ -270,7 +290,11 @@ def read_bms(port: str, baudrate: int, address: int, timeout: float = 2.2) -> di
         port, baudrate=int(baudrate), timeout=min(timeout, 0.25),
         write_timeout=timeout, bytesize=8, parity="N", stopbits=1,
     ) as ser:
-        ser.reset_input_buffer()
+        if guard_bus:
+            if getattr(ser, "in_waiting", 0):
+                raise SerialBusBusy("Trafic RS485 avant requête")
+        else:
+            ser.reset_input_buffer()
         ser.write(req)
         ser.flush()
         deadline = time.monotonic() + timeout
@@ -286,6 +310,12 @@ def read_bms(port: str, baudrate: int, address: int, timeout: float = 2.2) -> di
                 if frame == req:
                     echoed += 1
                     continue
+                if guard_bus:
+                    signature = passive_frame_signature(frame)
+                    if signature.endswith("crcOK-lenOK") and (
+                        "-c4A-k84-" in signature or "-c4A-k42-" in signature
+                    ):
+                        raise SerialBusBusy("Requête d'un autre maître RS485")
                 try:
                     return decode_response(frame, address)
                 except DarenSerialError as exc:

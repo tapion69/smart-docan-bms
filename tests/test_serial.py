@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "smart_docan_bms" /
 from daren_serial import (
     DarenSerialError, decode_response, read_request, read_bms,
     parse_serial_addresses, validate_port, checksum, active_alarm_flags,
-    PassiveSerialMonitor, passive_frame_signature,
+    PassiveSerialMonitor, passive_frame_signature, check_quiet_bus, SerialBusBusy,
     decode_passive_response, length_checksum,
 )
 from serial_slots import SerialSlots
@@ -30,6 +30,41 @@ REFERENCE_FRAME = (
 
 
 class SerialProtocolTests(unittest.TestCase):
+    def test_explicit_address_list_reserves_sorted_slots_even_when_offline(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "serial_slots.json"
+            slots = SerialSlots(path, {"serial_addresses": "3,0,2,1"})
+            self.assertEqual(slots.configured(), [(1,0),(2,1),(3,2),(4,3)])
+            self.assertEqual(SerialSlots(path, {}).configured(), slots.configured())
+
+    def test_manual_mapping_preserves_physical_histories(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "serial_slots.json"
+            slots = SerialSlots(path, {"serial_addresses": "0,1,2,3",
+                                      "serial_slot_3_address": "3",
+                                      "serial_slot_4_address": "2"})
+            self.assertEqual(slots.configured(), [(1,0),(2,1),(3,3),(4,2)])
+
+    def test_quiet_check_blocks_existing_traffic_without_writing(self):
+        class BusyPort:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self, size): return b"\x85\x01"
+            def write(self, data): raise AssertionError("No write during listening")
+        with self.assertRaises(SerialBusBusy):
+            check_quiet_bus("/dev/fake", 9600, serial_factory=lambda *a, **kw: BusyPort())
+
+    def test_guarded_poll_refuses_waiting_bytes(self):
+        class BusyPort:
+            in_waiting = 1
+            def __init__(self, *args, **kwargs): pass
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def write(self, data): raise AssertionError("No write on busy port")
+        with patch.dict(sys.modules, {"serial": types.SimpleNamespace(Serial=BusyPort)}):
+            with self.assertRaises(SerialBusBusy):
+                read_bms("/dev/fake", 9600, 0, guard_bus=True)
+
     def test_frame_only_read_command(self):
         self.assertEqual(read_request(1), b"~22014A42E00201FD28\r")
         self.assertEqual(read_request(0), b"~22004A42E00200FD2A\r")

@@ -1,6 +1,6 @@
 name: Smart Docan BMS
 slug: smart_docan_bms
-version: "0.1.19-dev"
+version: "0.1.20-dev"
 description: Lecture Bluetooth ou Serial RS485 des BMS Daren / Docan Power NOON vers MQTT
 url: https://github.com/tapion69/smart-docan-bms
 arch:
@@ -16,8 +16,6 @@ services:
 panel_icon: mdi:battery-bluetooth
 options:
   transport: bluetooth
-  serial_passive: false
-  dual_rs485_active: false
   serial_port: ""
   serial_baudrate: 9600
   serial_addresses: ""
@@ -56,9 +54,7 @@ options:
   mqtt_tls: false
   log_level: info
 schema:
-  transport: list(bluetooth|serial|dual)
-  serial_passive: bool
-  dual_rs485_active: bool
+  transport: list(bluetooth|serial)
   serial_port: str?
   serial_baudrate: int(9600,19200)
   serial_addresses: str?

@@ -2,8 +2,8 @@
 
 Add-on **Home Assistant OS / Supervised** pour les batteries **Docan Power NOON équipées d'un BMS Daren** diffusant un nom Bluetooth commençant par `DWF`.
 
-> **Statut : 0.1.13-dev — développement, validé sur une première installation à 4 batteries.**
-> La lecture des 64 cellules a été confirmée sur cette installation. La connexion MQTT reste à valider sur le matériel cible après configuration manuelle.
+> **Statut : 0.1.20-dev — Bluetooth ou RS485 externe en lecture seule.**
+> La version 0.1.19 a reçu 20 réponses RS485 valides sur 20 (quatre adresses, 64 cellules) sur une installation réelle. La publication RS485 de tous les champs et la tenue en charge/décharge restent à valider sur le matériel.
 > Ce projet n'effectue aucune commande de configuration des BMS : uniquement des requêtes de télémétrie. Il ne remplace **jamais** les protections du BMS.
 
 ## Fonctionnalités de cette version
@@ -13,7 +13,7 @@ Add-on **Home Assistant OS / Supervised** pour les batteries **Docan Power NOON 
 - Mesures retournées par [aiobmsble](https://github.com/patman15/aiobmsble), bibliothèque Apache-2.0 (version 0.33.0), dont les **16 tensions de cellules** quand elles sont transmises.
 - Tension, courant, puissance, SOC, SOH, capacité, cycles, écarts, numéros des cellules min/max, températures individuelles, équilibrage, MOSFET, alarmes et informations disponibles selon le firmware.
 - MQTT Discovery : entités créées automatiquement **uniquement lorsqu'une valeur est réellement reçue**.
-- **Sans serveur web ni Ingress** : l’add-on est un collecteur Bluetooth/MQTT uniquement. Un dashboard HTML Home Assistant séparé sera conçu ultérieurement.
+- **Sans serveur web ni Ingress** : l’add-on est un collecteur Bluetooth ou RS485 vers MQTT. Un dashboard HTML Home Assistant séparé sera conçu ultérieurement.
 - Synthèse multi-batteries en **parallèle** : SOC pondéré par capacité lorsque connue, somme courants et puissances, tension moyenne, suspendue si une batterie connue est hors ligne.
 - Échecs Bluetooth : 3 erreurs consécutives avant passage hors ligne; reconnexion automatique au cycle suivant.
 - MQTT automatique (identifiants du Supervisor) ou manuel (hôte, port, identifiant et mot de passe masqué).
@@ -32,340 +32,51 @@ Les capteurs MQTT de tension utilisent `suggested_display_precision` et des mod�
 
 Le dashboard HTML prévu ultérieurement sera développé **séparément** dans Home Assistant et réutilisera les entités fixes MQTT, sans serveur web dans l'add-on.
 
-## Lecture Serial RS485 expérimentale (0.1.19-dev)
+## Connexion RS485 (lecture seule)
 
-### 0.1.19-dev — diagnostic de la prise RS485 externe dédiée
+Deux transports exclusifs : `bluetooth` ou `serial`. Le mode de comparaison dual et l'écoute passive expérimentale sont retirés de la configuration et du runtime.
 
-Le mode `dual` reste passif par défaut. Bluetooth seul alimente MQTT.
-Pour le port RJ45 marqué **RS485** dédié au PC/onduleur (et non RS485A/B
-interbatteries), après vérification du brochage et en l'absence de tout
-autre équipement maître, le diagnostic actif en lecture seule est optionnel :
+Brancher un convertisseur USB-RS485 compatible avec le brochage constructeur sur
+**la prise RS485 indépendante de la batterie Master**. Ne pas utiliser RS485A/B
+(bus interbatteries) ni une prise déjà interrogée par un autre maître.
+La pré-écoute initiale de six secondes est une précaution supplémentaire et ne
+garantit pas l'absence d'un autre maître. Un trafic concurrent reconnu suspend
+l'interrogation jusqu'au redémarrage.
+
+Exemple pour quatre adresses (remplacer le chemin par celui du convertisseur) :
 
 ```yaml
-transport: dual
-dual_rs485_active: true
+transport: serial
+serial_port: /dev/serial/by-id/VOTRE_CONVERTISSEUR
 serial_baudrate: 9600
 serial_addresses: "0,1,2,3"
+poll_seconds: 5
 ```
 
-Conserver le vrai `serial_port` USB déjà configuré. Ne jamais activer
-`dual_rs485_active` sur un bus interbatteries ou partagé. Une pré-écoute
-de six secondes bloque toute émission si un octet est reçu ; elle ne
-garantit pas à elle seule l'absence d'un autre maître. En cas de trafic
-concurrent détecté, l'interrogation est suspendue jusqu'au redémarrage
-de l'add-on. La collecte BLE continue normalement.
-
-Le seul message transmis est la commande de lecture Daren documentée
-`v22/4A/42`, par défaut aux adresses 0, 1, 2, 3 dans cet ordre. Chaque
-réponse est contrôlée (adresse, format, longueur, checksum). Les diagnostics
-affichent les nombres d'octets, non-ASCII, échos, entêtes et réponses
-décodées, ainsi que les écarts avec les mesures BLE récentes. Aucun champ
-inconnu n'est publié, aucune attribution automatique d'adresse ou de
-Master, aucune écriture de paramètres. Pas de dump de trames brutes.
-
-Si aucun octet ne revient à 9600, vérifier câblage, rôle du port et vitesse
-constructeur avant un essai distinct à 19200. En mode passif, un nouveau
-compteur des octets reçus et non-ASCII permet de distinguer silence et
-protocole non reconnu. Remettre `dual_rs485_active: false` pour revenir
-au diagnostic passif de la version précédente.
-
-
-
-### 0.1.18-dev — SOC identifié comme un unique octet, diagnostic de la quatrième batterie
-
-Les journaux de l'installation de test contiennent systématiquement les
-**trois mêmes représentations du SOC** : `5:u16_big_div1`,
-`6:u16_little_div1` et `6:u8`. Le motif `00 29 00` peut être lu
-comme 41 % par ces trois méthodes, mais **il s'agit du même octet à
-l'offset 6**, pas de trois champs indépendants.
-
-Le comparateur regroupe dorénavant ces représentations en un seul
-**candidat `offset 6 / u8`** et réduit à **0,45 point** la tolérance de
-correspondance des SOC. Les SOC 37 % et 38 % ne sont donc plus considérés
-équivalents. Il continue à exiger un champ commun sur plusieurs adresses
-RS485, plusieurs valeurs de SOC et des empreintes cellulaires crédibles.
-
-Lorsque ce champ peut être départagé sans autre hypothèse équivalente,
-le journal indique la **valeur réellement lue comme SOC candidat RS485**,
-par exemple `SOC RS485 candidat 41.0 % octet 6 u8`. Cela reste une
-hypothèse de décodage du protocole `v23/85`, **pas une donnée certifiée ni
-une publication MQTT**.
-
-Si trois adresses RS485 s'associent de manière probable à trois batteries
-BLE différentes lors d'au moins deux cycles, le journal signale aussi
-la **batterie BLE qui n'a pas de réponse RS485 directe**. Cette quatrième
-batterie est une *Master possible* mais **non confirmée** : son identité
-n'est pas imposée, ses données ne sont pas fabriquées et aucune
-association n'est enregistrée automatiquement. Le bus peut interroger
-16 adresses sans que les 16 batteries existent ; une requête `23/84`
-n'est pas une réponse `23/85`.
-
-Le mode `dual` conserve strictement le Bluetooth pour l'alimentation
-MQTT des capteurs, avec le RS485 en **réception seule**.
-
-
-
-### Comparaison SOC + numéro de cellule minimale (0.1.17-dev)
-
-En `transport: dual`, la référence Bluetooth reste la seule source des
-capteurs MQTT. L'enquête RS485 passive est enrichie avec :
-
-- **Numéro de cellule minimale** de chacune des 16 cellules, côté BLE et
-  dans chaque motif RS485 décodé. Le numéro est compté de 1 à 16. On ne
-  retient le minimum comme indice discriminant que s'il est séparé de la
-  deuxième cellule la plus basse d'au moins **2 mV** sur les deux chemins,
-  pour limiter les permutations dues à l'équilibrage.
-- **SOC** : on recherche dans les trames RS485 les valeurs susceptibles
-  de correspondre aux SOC Bluetooth (formats u8 ou u16, deux endiannesses,
-  diviseurs 1, 10, 100). Une position SOC ne peut départager les batteries
-  que si la **même position et le même format** expliquent au moins deux
-  adresses RS485 et deux groupes de SOC différant d'au moins **3 points**,
-  sans hypothèse concurrente de même score. Cela reste une correspondance
-  expérimentale du protocole, pas une valeur de SOC certifiée.
-- Chaque ligne `Dual diagnostic` affiche les numéros de cellules minimales,
-  leur écart avec la cellule suivante, le SOC BLE et le degré de validation
-  du champ SOC RS485. **Aucune correspondance n'est enregistrée en cas
-  d'ambiguïté ou par simple ordre des batteries.**
-- Nouvelle ligne `Dual trafic Master RS485` : liste séparément les adresses
-  ciblées par les demandes `23/84` et celles des réponses `23/85`.
-  Une requête vers une adresse n'indique pas que cette batterie a répondu.
-  Une Master peut interroger les slaves sur RS485 puis publier son état global
-  sur CAN ; aucune réponse de télémétrie de la Master elle-même n'est
-  garantie sur le port écouté. Ne pas inventer ses mesures par élimination.
-
-Ce diagnostic nécessite seulement `transport: dual`,
-`serial_baudrate: 9600` et le `serial_port` de l'adaptateur. Aucun polling
-RS485 n'est envoyé en mode dual, les identifiants MQTT et le dashboard
-restent inchangés. Comparer les SOC/indices cellulaires sur plusieurs
-cycles avant de confirmer une adresse.
-
-
-### Mode DUAL — comparer le Bluetooth aux réponses RS485 passives
-
-Ce mode sert aux installations où un **BMS Master** interroge déjà le bus
-RS485 : notre adaptateur USB ne doit pas devenir un deuxième maître.
-L'application garde les valeurs Bluetooth dans Home Assistant tout en
-étudiant le protocole RS485 en parallèle.
-
-Configuration :
-
-
-```yaml
-transport: dual
-serial_port: ""
-serial_baudrate: 9600
-serial_addresses: ""
-```
-
-
-Le **port reste vide par défaut**, à renseigner par chaque utilisateur.
-L'option `serial_passive` n'a aucun effet en mode `dual` :
-**le RS485 est en réception seule par défaut** (sauf option explicite
-`dual_rs485_active` pour le port externe dédié). Aucune modification de paramètre n'est envoyée. Le Bluetooth continue ses
-cycles normaux et demeure **la seule source MQTT** du dashboard.
-Les associations sauvegardées dans `/data/slots.json` ne changent pas,
-et les observations RS485 n'écrivent pas dans `serial_slots.json`.
-
-Toutes les ~30 secondes, le journal comporte :
-
-- `Dual RS485/BLE (~30 s)` : nombre de trames reçues, références
-  Bluetooth récentes (moins de 180 s) et adresses RS485 observées.
-- `Dual diagnostic` : recherche d'un tableau de 16 tensions
-  de cellules dans chaque réponse de 98 octets, sur plusieurs offsets,
-  dans les deux ordres d'octets, avec contrôle de plausibilité.
-- Si un motif est proche : candidat Bluetooth, décalage des cellules,
-  ordre d'octets, erreur moyenne et maximale en millivolts, et
-  décalages possibles du SOC et de la tension du pack.
-- Si les profils se ressemblent trop, le résultat est **AMBIGU** :
-  aucune correspondance n'est imposée par ordre ou par numéro.
-- Après deux comparaisons concordantes : **correspondance PROBABLE**,
-  jamais enregistrée ni automatiquement attribuée à un pack MQTT.
-
-Ces correspondances restent des **hypothèses** tant que le contenu
-du protocole v23/85 n'est pas confirmé par recoupement indépendant.
-Des cellules presque parfaitement équilibrées peuvent présenter
-des signatures quasiment identiques entre différents packs.
-
-Les 98 octets restent uniquement en mémoire le temps du diagnostic :
-pas de sauvegarde des trames brutes, ni d'export, ni de publication MQTT
-RS485 non confirmée. Si aucune séquence de cellules n'est reconnue,
-le journal le précise sans fabriquer des mesures.
-
-Pour revenir au mode habituel : `transport: bluetooth`.
-Les anciens modes `serial` et `serial_passive` restent disponibles.
-
-
-### Réponses v23/4A85 en écoute passive (pilote expérimental)
-
-Le test réel Docan NOON sur bus RS485 **9600 bauds** a identifié des
-requêtes émises par le Master `v23/4A84` (un octet de données)
-et des réponses `v23/4A85` (**98 octets**) avec checksum
-et longueur valides. L'ancien lecteur n'acceptait que les
-réponses `v22/4A00` (**99 octets**) ; il rejetait donc
-toutes les réponses observées malgré la bonne réception du bus.
-
-Le nouveau lecteur **n'envoie toujours aucune commande RS485** en
-`serial_passive: true`. Il reconnaît les trames `23/85`, contrôle leur
-checksum et leur adresse, puis tente **deux dispositions hypothétiques**
-du contenu de 98 octets par rapport aux 99 octets du format ancien :
-
-- octet `DATAFLAG` absent en tête ;
-- octet final absent en queue.
-
-Une lecture n'est publiée sur MQTT que si **une seule disposition**
-produit un ensemble cohérent (SOC, tension, 8 à 32 cellules,
-**somme des tensions des cellules proche de celle du pack**, températures,
-courant et capacité plausibles). Toute réponse ambiguë ou incompatible
-est rejetée : **aucune mesure ne doit être inventée**.
-
-**Limite :** les correspondances exactes des champs `23/85` ne sont
-pas encore confirmées par une trame brute réelle ni une documentation
-constructeur décrivant cette variante. Les tests de format ont utilisé
-des trames de synthèse dérivées du format `22/00`. Les journaux
-compareront donc les dispositions validées ou expliqueront les rejets.
-Comparer les premières valeurs RS485 récupérées avec les mesures Bluetooth
-reste nécessaire avant d'utiliser ces capteurs pour des décisions critiques.
-
-Le journal affiche toutes les ~30 secondes :
-
-- `RS485 passif (~30 s)` : nombre de réponses valides ;
-- `RS485 décodage passif validé` : disposition retenue ;
-- `RS485 diagnostics de décodage refusé` : catégorie d'échec sans divulguer
-  le contenu brut du BMS.
-
-Il est possible qu'un Master ne transmette pas ses propres mesures sur le
-bus interrogé : un total incomplet reste indisponible et les anciens
-`unique_id` MQTT sont conservés.
-
-
-
-### Diagnostic de protocole en écoute passive
-
-Si l'écoute passive reçoit des octets mais **0 réponses service 42**, le
-journal indique désormais toutes les ~30 secondes une ligne
-`RS485 diagnostic passif (entêtes uniquement)`. Elle regroupe les types de
-trames observés, par adresse et code de commande ainsi que leur longueur,
-checksum et longueur de données. Exemples de présentation :
-`v22-a01-c4A-k42-1o-crcOK-lenOK` pour une requête de lecture et
-`v22-a01-c4A-k00-99o-crcOK-lenOK` pour une réponse au format attendu.
-
-Ce **n'est pas encore le décodage** des autres services qui pourraient être
-utilisés par la Master. Les données brutes, mesures et identifiants internes
-ne sont jamais affichés dans ces diagnostics. Une fois le type de trame
-identifié, on pourra étudier son contenu et son format avec le protocole
-correspondant, sans activer le polling.
-
-L'écoute passive reste strictement **sans émission sur RS485**, le Bluetooth
-et les entités MQTT existantes sont inchangés.
-
-
-### Écoute passive lorsque le BMS Master pilote le bus (nouveau)
-
-Un BMS configuré **Master** peut déjà interroger ses esclaves sur le même
-bus RS485. Ajouter notre lecteur USB comme un **second maître actif** peut
-alors perturber les échanges et produire des erreurs intermittentes du type
-« Réponse d'une autre adresse ou protocole », même si les quatre batteries
-sont fonctionnelles. Le pilote de référence
-[cpttinkering/daren-485](https://github.com/cpttinkering/daren-485)
-documente l'interrogation active des esclaves par une unité Master.
-
-**Configuration recommandée pour étudier ce cas :**
-
-```yaml
-transport: serial
-serial_passive: true
-serial_port: ""
-serial_baudrate: 9600
-serial_addresses: ""
-```
-
-Le chemin de **serial_port reste à saisir par chaque utilisateur**.
-`serial_passive: true` :
-
-- **N'envoie aucune requête RS485** (aucun `write`, ni réinitialisation du
-  tampon d'entrée) : le port USB reste ouvert pour écouter les échanges
-  de l'équipement Master déjà présent.
-- Décode les **réponses de télémétrie valides** du protocole Daren service 42
-  lorsqu'elles traversent physiquement le convertisseur, avec validation
-  stricte des adresses, des sommes de contrôle et des 16 cellules.
-- Conserve les affectations persistantes `serial_slots.json`, les
-  identifiants MQTT et les calculs globaux dynamiques.
-- Marque indisponible une batterie lorsqu'aucune télémétrie valide n'a
-  été reçue depuis plus de `max(90 s, poll_seconds × 3)` : ne compte
-  jamais une vieille lecture comme courante.
-- Affiche toutes les 30 secondes un diagnostic `RS485 passif (4 s)` :
-  octets, trames, réponses valides, autres trames, rejetées et BMS en ligne.
-  Aucune donnée série brute ou identifiant personnel n'est enregistré.
-
-**Limite importante :** il faut que le port utilisé permette réellement
-d'**observer** les réponses du bus et que ces réponses contiennent des trames
-Daren service 42. Le Master peut interroger ses esclaves **sans jamais
-publier ses propres mesures** sur ce câble ; dans ce cas l'écoute passive
-affichera moins de quatre packs et les totaux seront masqués. Ce comportement
-est un diagnostic de la topologie, pas un défaut à compenser avec de fausses
-valeurs. Si aucune réponse valide n'est observée, remettre
-`serial_passive: false` pour revenir au mode actif initial.
-
-Le mode `serial_passive: false` **reste le réglage par défaut** pour
-préserver la compatibilité avec les installations où le convertisseur USB
-est le seul maître interrogateur. Le mode Bluetooth n'est pas modifié.
-
-
-### Correctif alarmes RS485 (0.1.13-dev)
-
-Une installation Docan avec 4 BMS répondants aux adresses RS485 1,2,3,4
-peut renvoyer `0000/0002/0000/0000` pour les quatre mots de statut.
-La version antérieure déclarait à tort `problem: true` dès qu'un mot
-de statut était non nul. D'après le pilote Daren DR-1363 de référence,
-les **bits d'alarme/protection du mot courant** sont les bits **2 à 7** ;
-le bit **1 (0x0002)** n'est pas identifié comme une alarme.
-
-- `binary_sensor.smart_docan_bms_battery_N_problem` : désormais **OFF**
-  pour ce seul bit 1, mais reste **ON** pour les bits de protection documentés.
-- `sensor.smart_docan_bms_battery_N_problem_code` : conserve son identifiant
-  MQTT et n'affiche plus que les **bits d'alarme** (ex. `0000/0000/0000/0000`).
-- Nouveau `sensor.smart_docan_bms_battery_N_status_code_raw` : conserve
-  l'intégralité des quatre mots de statut d'origine
-  (`0000/0002/0000/0000`) pour les diagnostics et les futures recherches.
-- Les totaux et les alarmes globales s'appuient toujours sur les
-  protections documentées, et non sur les simples états internes.
-
-Quand `serial_addresses` est vide et que tous les emplacements activés
-sont associés, la recherche des adresses supplémentaires s'arrête :
-le bus ne questionne plus inutilement `0` sur un système 4 packs adressés
-`1,2,3,4`. Une liste `serial_addresses` renseignée explicitement
-reste prioritaire.
-
-
-**Master Docan / adresse 0** — La documentation fabricant définit PACK0 (Master) sur l'adresse RS485 `0` et les packs esclaves sur `1` à `15` (DIP 1–4). L'add-on détecte maintenant l'adresse `0` avec la même commande **de lecture seule** que pour les esclaves. Pour un parc dont les BMS RS485 `1,2,3` sont déjà enregistrés dans `serial_slots.json`, la Master `0` rejoint le prochain emplacement libre (généralement Batterie 4), **sans renommer les entités MQTT existantes**. Laisser `slot_4_enabled: true` pour suivre les quatre packs et obtenir les totaux. Source constructeur : https://www.docanpower.com/index.php?download_id=102&product_id=594&route=product%2Fproduct%2Fdownload .
-
-**Diagnostic 0.1.10** : en présence de bruit ou d'un convertisseur qui répète notre propre commande, le lecteur continue à attendre une réponse **DR-1363 valide** au lieu d'abandonner sur le premier message. Une seule commande de lecture est transmise par adresse. Les journaux présentent des compteurs `octets`, `échos`, `octets_non_ASCII`, `trames_rejetées` et `dernier_défaut` ; ils ne divulguent pas les trames reçues. Un écho n'est **pas** une preuve que le BMS répond. Une absence persistante de trame valide justifie l'essai en `9600` bauds, puis une vérification du brochage et du protocole.
-
-
-L'add-on propose désormais **`transport: bluetooth`** (mode historique, inchangé) et **`transport: serial`** (RS485 filaire). Le service Serial est strictement **en lecture seule**, sans fonction d'écriture de paramètres ou de firmware. Il est basé sur le protocole **Daren DR-1363**, service **42 (GetDeviceInfo)**, documenté par [cpttinkering/daren-485](https://github.com/cpttinkering/daren-485) (MIT). Il peut ne **pas** correspondre aux firmwares de toutes les batteries Docan Power NOON : les premiers journaux du test réel servent à valider le protocole.
-
-### Configuration pour le premier test
-
-```yaml
-transport: serial
-serial_port: ""
-serial_baudrate: 9600
-serial_addresses: ""
-```
-
-**Le champ `serial_port` est intentionnellement vide par défaut.** Chaque utilisateur saisit son propre port matériel, de préférence le chemin stable `/dev/serial/by-id/...`. Aucun port d'un utilisateur n'est préconfiguré ni commité.
-
-- `serial_baudrate` : **9600** par défaut (confirmé sur les batteries Docan testées), ou **19200** selon le BMS.
-- `serial_addresses` : vide = recherche de **PACK0 (Master)** puis des adresses **1, 2, 3 et 4** ; sinon `0,1,2,3` ou une liste d'adresses **0 à 15**. La Master Docan est adressée `0` dans cette famille de BMS (commande DR-1363 de lecture seule, pas Modbus RTU).
-- `serial_slot_1_address` ... `serial_slot_4_address` : vides = première association automatique à un emplacement libre, sauvegardée dans `/data/serial_slots.json` ; renseignés = attribuer précisément une adresse RS485 à Batterie 1, 2, 3 ou 4.
-- `slot_1_enabled` ... `slot_4_enabled` : les mêmes interrupteurs que pour le Bluetooth, qui déterminent les emplacements pris en compte.
-- `poll_seconds` : même intervalle cible des lectures et publications MQTT.
-
-En mode `serial`, le service **n'interroge pas les appareils Bluetooth**, mais conserve les mêmes `unique_id` MQTT, le même appareil « Docan Power - Global », le dashboard et les totaux adaptatifs. En revenant au mode `bluetooth`, les associations BLE précédentes dans `/data/slots.json` restent intactes. En mode Serial, l'association est stockée **séparément**, dans `/data/serial_slots.json`.
-
-La reconnaissance série d'un nouveau BMS utilise la première réponse **valide** (en-tête, longueur, somme de contrôle, 8 à 32 cellules, plages de mesures plausibles). Cela évite de présenter une trame d'un autre protocole comme une batterie valide. Chaque cycle de recherche est séquentiel et sans écriture de paramètre. Aucun BMS ne répond ? Le journal indique les adresses essayées, les erreurs de protocole ou de communication et les réglages à vérifier.
-
-**Important :** ne pas brancher deux maîtres RS485 actifs sur le même bus, et vérifier la bonne connexion A/B et les adresses des batteries. Le fait que Home Assistant voie le convertisseur USB ne prouve pas que le BMS utilise ce protocole. Il est également normal que les capteurs spécifiques au Bluetooth (RSSI) soient indisponibles en mode Serial.
+La commande documentée v22/4A/42 et sa réponse v22/4A/00 sont les seuls
+échanges de télémétrie utilisés. Adresse 0 incluse. Sans liste explicite,
+l'add-on recherche 0 à 4 (liste personnalisable, adresses 0 à 15).
+Les adresses sont interrogées dans l'ordre croissant ; les nouvelles associations
+sont sauvegardées. Une liste explicite réserve les emplacements attendus,
+même si un BMS ne répond pas ; les anciennes associations ne sont jamais
+renumérotées automatiquement. Les emplacements manuels prévalent.
+
+Pour conserver les historiques physiques lors d'une migration Bluetooth vers
+RS485, renseigner serial_slot_1_address à serial_slot_4_address avec les
+adresses vérifiées de chaque batterie. Les identifiants MQTT, tableaux de bord
+et noms d'emplacement restent fixes. Sans correspondance manuelle, une nouvelle
+installation avec la liste 0,1,2,3 utilise l'ordre croissant. La cadence cible
+peut être de 5 s ; les adresses non associées absentes sont retestées au plus
+une fois par minute. Une batterie déjà connue reste surveillée ; trois échecs
+consécutifs la marquent hors ligne et la synthèse ne masque pas son absence.
+
+**Migration 0.1.19 vers 0.1.20 :** avant la mise à jour, remplacer le mode dual
+par serial (sur le port dédié) ou bluetooth, et sauvegarder. Si l'ancien
+mode est encore présent au lancement, le runtime revient au Bluetooth par
+prudence ; si le Supervisor refuse l'ancienne option, modifier le transport
+dans la configuration. Retirer les options obsolètes serial_passive et
+dual_rs485_active si elles subsistent. Les fichiers d'associations BLE et
+RS485 restent distincts et conservés. Aucune écriture de paramètres BMS.
 
 ## Installation
 
@@ -413,6 +124,11 @@ Le logo choisi pour Smart Docan BMS (batterie à quatre cellules vertes, connexi
 
 | Option | Exemple | Rôle |
 | --- | --- | --- |
+| `transport` | `bluetooth` | Bluetooth ou RS485 (`serial`), exclusifs |
+| `serial_port` | `""` | Chemin du convertisseur USB-RS485 sur le port externe dédié |
+| `serial_baudrate` | `9600` | Vitesse RS485, 19200 possible selon BMS |
+| `serial_addresses` | `""` | Adresses attendues, ou découverte 0 à 4 |
+| `serial_slot_1_address` à `serial_slot_4_address` | `""` | Correspondance manuelle pour conserver les historiques physiques |
 | `auto_discover` | `true` | Trouve automatiquement les appareils `DWF*` |
 | `strict_slots` | `false` | Ne pas attribuer automatiquement de nouveaux BMS lorsqu'activé |
 | `migrate_legacy_entities` | `true` | Supprime les anciennes découvertes MQTT après publication des nouveaux ID |
@@ -547,7 +263,7 @@ smart_docan_bms/
   Dockerfile
   requirements.txt
   app/
-    run.py           # boucle Bluetooth et MQTT
+    run.py           # boucles Bluetooth ou RS485 et MQTT
     logic.py         # traitement des données
     settings.py      # options MQTT et cadence
     slots.py         # associations BMS -> emplacement, stockées dans /data/slots.json

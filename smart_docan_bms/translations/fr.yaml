@@ -1,10 +1,7 @@
 configuration:
-  serial_passive:
-    name: Serial — écoute passive sans polling
-    description: Activé = écoute le bus du BMS Master, sans envoyer aucune requête RS485 ; désactivé = interrogation active comme auparavant. La Master doit émettre des trames lisibles pour que ses mesures remontent.
   transport:
     name: Mode de communication
-    description: bluetooth = normal ; serial = lecture filaire RS485 ; dual = Bluetooth pour MQTT + écoute passive RS485 pour comparer les cellules (aucune commande série)
+    description: bluetooth = lecture sans fil ; serial = lecture filaire sur la prise RS485 indépendante de la Master (pas RS485A/B).
   serial_port:
     name: Serial - chemin du port (à renseigner)
     description: Vide par défaut ; saisir soi-même /dev/serial/by-id/... du convertisseur USB-RS485
@@ -71,7 +68,7 @@ configuration:
     name: Durée de recherche Bluetooth (secondes)
   poll_seconds:
     name: Intervalle cible entre débuts des lectures BMS (secondes)
-    description: Chaque cycle lit toutes les batteries et publie les valeurs; si les 4 BMS prennent plus longtemps, la cadence sera limitée par le Bluetooth
+    description: Chaque cycle lit les batteries ; cadence réelle limitée par le temps des échanges. Minimum 5 s.
   rescan_seconds:
     name: Fréquence de recherche des appareils (secondes)
   missing_rescan_seconds:

@@ -50,6 +50,18 @@ class SerialSlots:
         self.mapping.update(overrides)
         if len(self.mapping.values()) != len(set(self.mapping.values())):
             raise ValueError("Adresse RS485 affectée deux fois")
+        # An explicitly supplied address list defines expected packs, including
+        # offline ones. Reserve missing slots in ascending address order, never
+        # renumber persisted or manually overridden mappings.
+        explicit = str(options.get("serial_addresses") or "").strip()
+        if explicit:
+            for address in sorted(parse_serial_addresses(explicit)):
+                if address in self.mapping.values():
+                    continue
+                slot = next((n for n in range(1, 5) if n not in self.mapping), None)
+                if slot is None:
+                    break
+                self.mapping[slot] = address
         self._save()
 
     def _save(self):

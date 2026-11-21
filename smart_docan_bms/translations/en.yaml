@@ -1,10 +1,7 @@
 configuration:
-  serial_passive:
-    name: Serial — passive listening, no polling
-    description: On = listen to the BMS Master bus without transmitting RS485 requests. Off = previous active polling mode. Master telemetry may not be available if not transmitted.
   transport:
     name: Communication transport
-    description: bluetooth = usual operation ; serial = RS485 reader ; dual = BLE MQTT readings plus receive-only RS485 cell-pattern comparison (no serial queries)
+    description: bluetooth = wireless reads; serial = read-only polling on the dedicated Master RS485 port (not RS485A/B).
   serial_port:
     name: Serial device path (user supplied)
     description: Empty by default; enter the USB-RS485 device's own /dev/serial/by-id/... path
@@ -64,7 +61,7 @@ configuration:
     name: Bluetooth scanning duration (seconds)
   poll_seconds:
     name: Target time between BMS polling cycle starts (seconds)
-    description: Each cycle reads all batteries and publishes measurements; BLE duration can limit throughput
+    description: Each cycle reads all batteries; actual rate depends on communication duration. Minimum 5 seconds.
   rescan_seconds:
     name: Device rescan interval (seconds)
   missing_rescan_seconds:
