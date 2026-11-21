@@ -32,51 +32,52 @@ Les capteurs MQTT de tension utilisent `suggested_display_precision` et des mod�
 
 Le dashboard HTML prévu ultérieurement sera développé **séparément** dans Home Assistant et réutilisera les entités fixes MQTT, sans serveur web dans l'add-on.
 
-## Connexion RS485 (lecture seule)
+## Communication Bluetooth ou RS485 (0.1.21-dev)
 
-Deux transports exclusifs : `bluetooth` ou `serial`. Le mode de comparaison dual et l'écoute passive expérimentale sont retirés de la configuration et du runtime.
+Deux modes exclusivement : `bluetooth` et `serial`. L'ancien mode dual
+n'est plus proposé. Le Bluetooth conserve ses associations existantes.
 
-Brancher un convertisseur USB-RS485 compatible avec le brochage constructeur sur
-**la prise RS485 indépendante de la batterie Master**. Ne pas utiliser RS485A/B
-(bus interbatteries) ni une prise déjà interrogée par un autre maître.
-La pré-écoute initiale de six secondes est une précaution supplémentaire et ne
-garantit pas l'absence d'un autre maître. Un trafic concurrent reconnu suspend
-l'interrogation jusqu'au redémarrage.
+**Le RS485 classe automatiquement les batteries selon leur adresse physique.**
+Le logiciel interroge les adresses `0` à `4` par défaut, valide les réponses
+et classe les batteries trouvées dans l'ordre croissant. Avec les quatre
+adresses 0, 1, 2 et 3 : Batterie 1 = adresse 0 (Master),
+Batterie 2 = adresse 1, Batterie 3 = adresse 2, Batterie 4 = adresse 3.
+Les affectations antérieures dans `/data/serial_slots.json` sont automatiquement
+remises en ordre ; pas besoin de les effacer ni de modifier les DIP switches.
+Les anciennes options `serial_slot_1_address` à
+`serial_slot_4_address` sont **supprimées et ignorées**.
 
-Exemple pour quatre adresses (remplacer le chemin par celui du convertisseur) :
+Configuration conseillée sur le port indépendant RS485 de la Master :
 
 ```yaml
 transport: serial
 serial_port: /dev/serial/by-id/VOTRE_CONVERTISSEUR
 serial_baudrate: 9600
-serial_addresses: "0,1,2,3"
+serial_addresses: ""
 poll_seconds: 5
 ```
 
-La commande documentée v22/4A/42 et sa réponse v22/4A/00 sont les seuls
-échanges de télémétrie utilisés. Adresse 0 incluse. Sans liste explicite,
-l'add-on recherche 0 à 4 (liste personnalisable, adresses 0 à 15).
-Les adresses sont interrogées dans l'ordre croissant ; les nouvelles associations
-sont sauvegardées. Une liste explicite réserve les emplacements attendus,
-même si un BMS ne répond pas ; les anciennes associations ne sont jamais
-renumérotées automatiquement. Les emplacements manuels prévalent.
+`serial_addresses` est facultatif. Vide, il essaie les adresses 0 à 4 ;
+une liste explicite (p. ex. `0,1,2,3`) limite les adresses et réserve
+les emplacements même lorsqu'une batterie est temporairement hors ligne.
+Les adresses persistées restent surveillées. Les nouvelles adresses
+détectées sont intégrées dans l'ordre croissant et les emplacements MQTT
+sont réattribués si nécessaire. Les identifiants MQTT du dashboard
+restent identiques ; attention, un historique lié à l'ancien numéro
+Bluetooth peut désormais afficher les mesures d'une autre batterie
+physique, notamment les batteries 3 et 4 de l'installation de test.
 
-Pour conserver les historiques physiques lors d'une migration Bluetooth vers
-RS485, renseigner serial_slot_1_address à serial_slot_4_address avec les
-adresses vérifiées de chaque batterie. Les identifiants MQTT, tableaux de bord
-et noms d'emplacement restent fixes. Sans correspondance manuelle, une nouvelle
-installation avec la liste 0,1,2,3 utilise l'ordre croissant. La cadence cible
-peut être de 5 s ; les adresses non associées absentes sont retestées au plus
-une fois par minute. Une batterie déjà connue reste surveillée ; trois échecs
-consécutifs la marquent hors ligne et la synthèse ne masque pas son absence.
+Brancher uniquement sur la prise RS485 externe dédiée, compatible avec
+le brochage constructeur, jamais sur RS485A/B et jamais sur un bus
+avec un autre maître actif. La pré-écoute de six secondes est une
+précaution ; elle ne prouve pas l'absence de tout maître. La commande
+`v22/4A/42` ne lit que la télémétrie, sans écrire de paramètres.
+Les batteries absentes sont retestées avec une temporisation, et les
+associations sont conservées lors du redémarrage.
 
-**Migration 0.1.19 vers 0.1.20 :** avant la mise à jour, remplacer le mode dual
-par serial (sur le port dédié) ou bluetooth, et sauvegarder. Si l'ancien
-mode est encore présent au lancement, le runtime revient au Bluetooth par
-prudence ; si le Supervisor refuse l'ancienne option, modifier le transport
-dans la configuration. Retirer les options obsolètes serial_passive et
-dual_rs485_active si elles subsistent. Les fichiers d'associations BLE et
-RS485 restent distincts et conservés. Aucune écriture de paramètres BMS.
+**Migration :** supprimer dans la configuration les quatre anciens champs
+`serial_slot_*_address` s'ils avaient été renseignés. Les laisser
+vides est désormais suffisant, mais ils ne sont plus proposés dans l'interface.
 
 ## Installation
 
@@ -127,8 +128,7 @@ Le logo choisi pour Smart Docan BMS (batterie à quatre cellules vertes, connexi
 | `transport` | `bluetooth` | Bluetooth ou RS485 (`serial`), exclusifs |
 | `serial_port` | `""` | Chemin du convertisseur USB-RS485 sur le port externe dédié |
 | `serial_baudrate` | `9600` | Vitesse RS485, 19200 possible selon BMS |
-| `serial_addresses` | `""` | Adresses attendues, ou découverte 0 à 4 |
-| `serial_slot_1_address` à `serial_slot_4_address` | `""` | Correspondance manuelle pour conserver les historiques physiques |
+| `serial_addresses` | `""` | Découverte automatique 0 à 4, classement croissant (liste facultative) |
 | `auto_discover` | `true` | Trouve automatiquement les appareils `DWF*` |
 | `strict_slots` | `false` | Ne pas attribuer automatiquement de nouveaux BMS lorsqu'activé |
 | `migrate_legacy_entities` | `true` | Supprime les anciennes découvertes MQTT après publication des nouveaux ID |

@@ -33,36 +33,17 @@ class SerialSlots:
                     raise ValueError("Association RS485 enregistrée invalide")
                 self.mapping[slot] = address
 
-        overrides = {}
-        for n in range(1, 5):
-            v = str(options.get(f"serial_slot_{n}_address") or "").strip()
-            if v:
-                addresses = parse_serial_addresses(v)
-                if len(addresses) != 1:
-                    raise ValueError(f"serial_slot_{n}_address : une seule adresse RS485")
-                overrides[n] = addresses[0]
-        if len(set(overrides.values())) != len(overrides):
-            raise ValueError("Une même adresse RS485 est affectée à plusieurs batteries")
-        # Explicit slot address takes precedence over older auto assignment.
-        for n, addr in list(self.mapping.items()):
-            if n not in overrides and addr in overrides.values():
-                del self.mapping[n]
-        self.mapping.update(overrides)
-        if len(self.mapping.values()) != len(set(self.mapping.values())):
-            raise ValueError("Adresse RS485 affectée deux fois")
-        # An explicitly supplied address list defines expected packs, including
-        # offline ones. Reserve missing slots in ascending address order, never
-        # renumber persisted or manually overridden mappings.
+        # Address itself defines the canonical display order. Older persisted
+        # mappings are sorted again on upgrade; no manual per-slot inputs needed.
+        # An explicit bus-address list, when supplied, replaces stale saved IDs.
         explicit = str(options.get("serial_addresses") or "").strip()
-        if explicit:
-            for address in sorted(parse_serial_addresses(explicit)):
-                if address in self.mapping.values():
-                    continue
-                slot = next((n for n in range(1, 5) if n not in self.mapping), None)
-                if slot is None:
-                    break
-                self.mapping[slot] = address
+        known = parse_serial_addresses(explicit) if explicit else tuple(self.mapping.values())
+        self._order_by_address(known)
         self._save()
+
+    def _order_by_address(self, addresses):
+        ordered = sorted(set(addresses))[:4]
+        self.mapping = {slot: address for slot, address in enumerate(ordered, 1)}
 
     def _save(self):
         canonical = json.dumps({
@@ -83,20 +64,20 @@ class SerialSlots:
         )
 
     def bind_detected(self, address: int) -> int | None:
+        """Discover physical addresses, always display in ascending address order."""
+        address = int(address)
+        if not 0 <= address <= 15:
+            raise ValueError("Adresse RS485 invalide")
         slot = self.slot_for(address)
         if slot is not None:
             return slot
         if address in self.mapping.values():
-            # Known but disabled; cannot reallocate it to a different slot.
+            return None  # disabled slot, keep reserved
+        if len(self.mapping) >= 4:
             return None
-        slot = next(
-            (n for n in range(1, 5) if self.enabled[n] and n not in self.mapping),
-            None,
-        )
-        if slot is not None:
-            self.mapping[slot] = address
-            self._save()
-        return slot
+        self._order_by_address((*self.mapping.values(), address))
+        self._save()
+        return self.slot_for(address)
 
     def configured(self):
         return sorted((slot, address) for slot, address in self.mapping.items()

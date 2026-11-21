@@ -37,13 +37,32 @@ class SerialProtocolTests(unittest.TestCase):
             self.assertEqual(slots.configured(), [(1,0),(2,1),(3,2),(4,3)])
             self.assertEqual(SerialSlots(path, {}).configured(), slots.configured())
 
-    def test_manual_mapping_preserves_physical_histories(self):
+    def test_previous_explicit_slot_settings_are_ignored(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "serial_slots.json"
             slots = SerialSlots(path, {"serial_addresses": "0,1,2,3",
                                       "serial_slot_3_address": "3",
                                       "serial_slot_4_address": "2"})
-            self.assertEqual(slots.configured(), [(1,0),(2,1),(3,3),(4,2)])
+            self.assertEqual(slots.configured(), [(1,0),(2,1),(3,2),(4,3)])
+
+    def test_saved_shuffled_mapping_migrates_to_numeric_order(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "serial_slots.json"
+            path.write_text(json.dumps({"version": 1, "slots": {
+                "1": 2, "2": 0, "3": 3, "4": 1
+            }}), encoding="utf-8")
+            slots = SerialSlots(path, {})
+            self.assertEqual(slots.configured(), [(1,0),(2,1),(3,2),(4,3)])
+            self.assertEqual(SerialSlots(path, {}).configured(), slots.configured())
+
+    def test_discovery_in_reverse_order_renumbers_automatically(self):
+        with tempfile.TemporaryDirectory() as folder:
+            slots = SerialSlots(Path(folder) / "serial_slots.json", {})
+            self.assertEqual(slots.bind_detected(3), 1)
+            self.assertEqual(slots.bind_detected(2), 1)
+            self.assertEqual(slots.bind_detected(1), 1)
+            self.assertEqual(slots.bind_detected(0), 1)
+            self.assertEqual(slots.configured(), [(1,0),(2,1),(3,2),(4,3)])
 
     def test_quiet_check_blocks_existing_traffic_without_writing(self):
         class BusyPort:
@@ -95,13 +114,13 @@ class SerialProtocolTests(unittest.TestCase):
             self.assertEqual(old.bind_detected(3), 3)
 
             updated = SerialSlots(path, {})
-            self.assertEqual(updated.bind_detected(0), 4)
-            self.assertEqual(updated.slot_for(0), 4)
-            self.assertEqual(updated.configured(), [(1, 1), (2, 2), (3, 3), (4, 0)])
+            self.assertEqual(updated.bind_detected(0), 1)
+            self.assertEqual(updated.slot_for(0), 1)
+            self.assertEqual(updated.configured(), [(1, 0), (2, 1), (3, 2), (4, 3)])
 
             restart = SerialSlots(path, {})
-            self.assertEqual(restart.configured(), [(1, 1), (2, 2), (3, 3), (4, 0)])
-            self.assertEqual(restart.bind_detected(0), 4)
+            self.assertEqual(restart.configured(), [(1, 0), (2, 1), (3, 2), (4, 3)])
+            self.assertEqual(restart.bind_detected(0), 1)
 
             # The MQTT aggregate now counts the four parallel packs, not three.
             sample = normalise_sample(decode_response(REFERENCE_FRAME, 1))
@@ -117,7 +136,7 @@ class SerialProtocolTests(unittest.TestCase):
     def test_explicit_master_mapping_accepts_address_zero(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "serial_slots.json"
-            slots = SerialSlots(path, {"serial_slot_1_address": "0"})
+            slots = SerialSlots(path, {"serial_addresses": "0"})
             self.assertEqual(slots.slot_for(0), 1)
             self.assertEqual(SerialSlots(path, {}).slot_for(0), 1)
 
@@ -550,26 +569,24 @@ class SerialProtocolTests(unittest.TestCase):
             path = Path(tmp) / "serial_slots.json"
             slots = SerialSlots(path, {})
             self.assertEqual(slots.bind_detected(3), 1)
-            self.assertEqual(slots.bind_detected(1), 2)
+            self.assertEqual(slots.bind_detected(1), 1)
             again = SerialSlots(path, {})
-            self.assertEqual(again.slot_for(3), 1)
-            self.assertEqual(again.slot_for(1), 2)
-            self.assertEqual(again.bind_detected(3), 1)
-            self.assertEqual(again.bind_detected(2), 3)
+            self.assertEqual(again.slot_for(3), 2)
+            self.assertEqual(again.slot_for(1), 1)
+            self.assertEqual(again.bind_detected(3), 2)
+            self.assertEqual(again.bind_detected(2), 2)
+            self.assertEqual(again.configured(), [(1,1),(2,2),(3,3)])
 
-    def test_manual_serial_reassignment_and_disabled_slot(self):
+    def test_disabled_slot_is_not_recycled(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "serial_slots.json"
-            initial = SerialSlots(path, {"serial_slot_2_address": "9"})
-            self.assertEqual(initial.slot_for(9), 2)
-            swapped = SerialSlots(path, {
-                "serial_slot_4_address": "9", "slot_4_enabled": True,
-                "slot_2_enabled": False,
-            })
-            self.assertEqual(swapped.slot_for(9), 4)
-            self.assertEqual(swapped.inactive(), [2])
-            with self.assertRaises(ValueError):
-                SerialSlots(path, {"serial_slot_1_address": "3", "serial_slot_3_address": "3"})
+            all_slots = SerialSlots(path, {"serial_addresses": "0,1,2,3"})
+            self.assertEqual(all_slots.configured(), [(1,0),(2,1),(3,2),(4,3)])
+            disabled = SerialSlots(path, {"slot_2_enabled": False})
+            self.assertEqual(disabled.slot_for(1), None)
+            self.assertEqual(disabled.inactive(), [2])
+            self.assertEqual(disabled.configured(), [(1,0),(3,2),(4,3)])
+            self.assertIsNone(disabled.bind_detected(1))
 
 
 if __name__ == "__main__":

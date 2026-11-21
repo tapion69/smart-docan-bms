@@ -322,7 +322,7 @@ async def run_serial(settings: dict) -> None:
     bus_checked = False
     bus_blocked = False
     LOG.info(
-        "Mode Serial RS485 (lecture seule) : vitesse %d, adresses à rechercher %s",
+        "Mode Serial RS485 (lecture seule, ordre automatique des adresses) : vitesse %d, adresses à rechercher %s",
         baudrate, ",".join(map(str, address_list)),
     )
     if not port:
@@ -394,13 +394,28 @@ async def run_serial(settings: dict) -> None:
                             read_serial_bms, port, baudrate, address, guard_bus=True
                         )
                         if slot is None:
+                            previous_mapping = dict(serial_slots.mapping)
                             slot = serial_slots.bind_detected(address)
+                            if previous_mapping != serial_slots.mapping:
+                                # Every logical MQTT slot follows its physical
+                                # RS485 address, even when a lower address is
+                                # discovered after previously known batteries.
+                                for ordered_slot, known_address in serial_slots.configured():
+                                    known_ident = f"serial:{known_address:02d}"
+                                    store.register_slot(
+                                        ordered_slot, known_ident, serial_slots.names[ordered_slot]
+                                    )
+                                    if bridge is not None:
+                                        bridge.battery(store.batteries[known_ident])
+                                LOG.info(
+                                    "RS485 : classement automatique par adresse : %s",
+                                    ", ".join(
+                                        f"Batterie {s}=adresse {a}"
+                                        for s, a in serial_slots.configured()
+                                    ),
+                                )
                             if slot is None:
-                                continue  # four logical slots already occupied
-                            LOG.info(
-                                "RS485 : BMS adresse %d associé à Batterie %d (persistant)",
-                                address, slot,
-                            )
+                                continue  # all enabled slots occupied
                         ident = f"serial:{address:02d}"
                         store.register_slot(slot, ident, serial_slots.names[slot])
                         data = normalise_sample(sample)
@@ -469,7 +484,7 @@ async def run() -> None:
         level=getattr(logging, str(settings["log_level"]).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    LOG.info("Smart Docan BMS 0.1.20-dev — Bluetooth ou RS485 externe en lecture seule")
+    LOG.info("Smart Docan BMS 0.1.21-dev — classement RS485 automatique par adresse")
     transport = str(settings.get("transport", "bluetooth")).strip().lower()
     if transport == "dual":
         # Older dual configurations published BLE only. Never enable serial writes implicitly.

@@ -10,16 +10,7 @@ configuration:
     description: 9600 par défaut pour les batteries Docan vérifiées ; 19200 possible selon BMS
   serial_addresses:
     name: Serial - adresses BMS à interroger (facultatif)
-    description: Vide = essayer la Master (adresse 0), puis les adresses 1 à 4 ; sinon saisir par exemple 0,1,2,3 (adresses 0 à 15)
-  serial_slot_1_address:
-    name: Batterie 1 - adresse RS485 (facultatif)
-    description: Vide = attribution automatique ; si renseignée, ce BMS conserve le numéro Batterie 1
-  serial_slot_2_address:
-    name: Batterie 2 - adresse RS485 (facultatif)
-  serial_slot_3_address:
-    name: Batterie 3 - adresse RS485 (facultatif)
-  serial_slot_4_address:
-    name: Batterie 4 - adresse RS485 (facultatif)
+    description: Vide = découverte automatique (0 à 4) et classement par adresse croissante ; liste facultative pour limiter la recherche
   strict_slots:
     name: Emplacements stricts
     description: Seules les batteries déjà associées aux emplacements sont lues, sans attribution automatique de nouveaux appareils
